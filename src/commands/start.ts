@@ -288,9 +288,11 @@ console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram
     console.error("`--slack` with `start` requires `--trigger`.");
     process.exit(1);
   }
-if (alexaFlag && !hasTriggerFlag) {
+  if (alexaFlag && !hasTriggerFlag) {
     console.error("`--alexa` with `start` requires `--trigger`.");
-if (whatsappFlag && !hasTriggerFlag) {
+    process.exit(1);
+  }
+  if (whatsappFlag && !hasTriggerFlag) {
     console.error("`--whatsapp` with `start` requires `--trigger`.");
     process.exit(1);
   }

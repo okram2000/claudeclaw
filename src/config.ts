@@ -97,6 +97,8 @@ export interface AlexaConfig {
   allowedUserIds: string[]; // Alexa user IDs to restrict access (empty = allow all)
   skipVerification: boolean; // Disable signature verification for local dev (never in prod)
   tunnelType: AlexaTunnelType;
+}
+
 export interface WhatsAppConfig {
   /** Phone numbers in international format without +, e.g. "14155551234". Empty = all allowed. */
   allowedNumbers: string[];
@@ -139,17 +141,17 @@ export interface Settings {
   telegram: TelegramConfig;
   discord: DiscordConfig;
   slack: SlackConfig;
-alexa: AlexaConfig;
-whatsapp: WhatsAppConfig;
+  alexa: AlexaConfig;
+  whatsapp: WhatsAppConfig;
   matrix: MatrixConfig;
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
-update: UpdateConfig;
+  update: UpdateConfig;
   browser: BrowserConfig;
   streaming: StreamingConfig;
-homeassistant: HomeAssistantConfig;
-integrations: IntegrationsConfig;
+  homeassistant: HomeAssistantConfig;
+  integrations: IntegrationsConfig;
 }
 
 export interface ModelConfig {
@@ -212,6 +214,8 @@ export interface StreamingConfig {
   updateInterval: number;
   /** Which platforms get streaming updates. Default: all. */
   platforms: string[];
+}
+
 export interface HomeAssistantConfig {
   enabled: boolean;
   /** Base URL of the Home Assistant instance, e.g. "http://homeassistant.local:8123" */
@@ -220,6 +224,8 @@ export interface HomeAssistantConfig {
   token: string;
   /** Entity IDs to highlight in status summaries (optional) */
   defaultEntities: string[];
+}
+
 export interface NotionIntegrationConfig {
   /** Notion integration token (secret_...) */
   token: string;
@@ -314,7 +320,7 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
         ? raw.slack.listenChannels.map(String)
         : [],
     },
-alexa: {
+    alexa: {
       enabled: raw.alexa?.enabled ?? false,
       port: Number.isFinite(raw.alexa?.port) ? Number(raw.alexa.port) : 3456,
       skillId: typeof raw.alexa?.skillId === "string" ? raw.alexa.skillId.trim() : "",
@@ -325,7 +331,8 @@ alexa: {
       tunnelType: (["cloudflared", "ngrok", "none"] as const).includes(raw.alexa?.tunnelType)
         ? raw.alexa.tunnelType as AlexaTunnelType
         : "none",
-whatsapp: {
+    },
+    whatsapp: {
       allowedNumbers: Array.isArray(raw.whatsapp?.allowedNumbers)
         ? raw.whatsapp.allowedNumbers.map(String)
         : [],
@@ -360,7 +367,7 @@ whatsapp: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
       model: typeof raw.stt?.model === "string" ? raw.stt.model.trim() : "",
     },
-update: {
+    update: {
       autoUpdate: raw.update?.autoUpdate ?? false,
       checkInterval: typeof raw.update?.checkInterval === "string" ? raw.update.checkInterval.trim() : "0 4 * * *",
       repo: typeof raw.update?.repo === "string" ? raw.update.repo.trim() : "okram2000/claudeclaw",
@@ -382,7 +389,8 @@ update: {
       enabled: raw.streaming?.enabled ?? false,
       updateInterval: Number.isFinite(raw.streaming?.updateInterval) ? Math.max(500, Number(raw.streaming.updateInterval)) : 1000,
       platforms: Array.isArray(raw.streaming?.platforms) ? raw.streaming.platforms.map(String) : ["discord", "telegram", "slack"],
-homeassistant: {
+    },
+    homeassistant: {
       enabled: raw.homeassistant?.enabled ?? false,
       baseUrl: typeof raw.homeassistant?.baseUrl === "string" ? raw.homeassistant.baseUrl.trim() : "",
       token: typeof raw.homeassistant?.token === "string" ? raw.homeassistant.token.trim() : "",
@@ -390,7 +398,7 @@ homeassistant: {
         ? raw.homeassistant.defaultEntities.map(String)
         : [],
     },
-integrations: {
+    integrations: {
       notion: {
         token: typeof raw.integrations?.notion?.token === "string" ? raw.integrations.notion.token.trim() : "",
         defaultDatabase: typeof raw.integrations?.notion?.defaultDatabase === "string" ? raw.integrations.notion.defaultDatabase.trim() : "",
