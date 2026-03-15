@@ -1,0 +1,137 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-US": {
+          "summary": "ClaudeClaw voice interface — talk to your personal AI assistant via Alexa",
+          "examplePhrases": [
+            "Alexa, ask claw what's my status",
+            "Alexa, ask claw to help me with code",
+            "Alexa, ask claw what's on my calendar"
+          ],
+          "name": "Claw",
+          "description": "ClaudeClaw is a personal AI assistant powered by Claude. This skill lets you interact with your self-hosted ClaudeClaw daemon using voice commands via Alexa."
+        }
+      },
+      "isAvailableWorldwide": false,
+      "testingInstructions": "Enable skill, then say 'Alexa, ask claw' followed by any question.",
+      "category": "PRODUCTIVITY_AND_UTILITIES",
+      "distributionCountries": ["US"]
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "https://YOUR_TUNNEL_URL_HERE"
+        },
+        "interfaces": []
+      }
+    },
+    "manifestVersion": "1.0",
+    "permissions": [],
+    "privacyAndCompliance": {
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false
+    }
+  },
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "claw",
+      "intents": [
+        {
+          "name": "AskClawIntent",
+          "slots": [
+            {
+              "name": "Query",
+              "type": "AMAZON.SearchQuery"
+            },
+            {
+              "name": "Topic",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "ask claw {Query}",
+            "tell claw {Query}",
+            "ask claw about {Topic}",
+            "tell claw about {Topic}",
+            "{Query}",
+            "I need help with {Query}",
+            "can you help me with {Query}",
+            "what do you know about {Topic}",
+            "help me with {Query}",
+            "what is {Query}",
+            "how do I {Query}",
+            "explain {Query}",
+            "summarize {Query}"
+          ]
+        },
+        {
+          "name": "StatusIntent",
+          "slots": [],
+          "samples": [
+            "what's your status",
+            "status",
+            "are you running",
+            "are you online",
+            "what's going on",
+            "give me a status update",
+            "how are you doing",
+            "what are you up to"
+          ]
+        },
+        {
+          "name": "AMAZON.HelpIntent"
+        },
+        {
+          "name": "AMAZON.StopIntent"
+        },
+        {
+          "name": "AMAZON.CancelIntent"
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent"
+        }
+      ],
+      "types": []
+    },
+    "dialog": {
+      "intents": [
+        {
+          "name": "AskClawIntent",
+          "confirmationRequired": false,
+          "prompts": {},
+          "slots": [
+            {
+              "name": "Query",
+              "type": "AMAZON.SearchQuery",
+              "confirmationRequired": false,
+              "elicitationRequired": true,
+              "prompts": {
+                "elicitation": "Elicit.Slot.AskClawIntent.Query"
+              }
+            }
+          ]
+        }
+      ],
+      "delegationStrategy": "SKILL_RESPONSE"
+    },
+    "prompts": [
+      {
+        "id": "Elicit.Slot.AskClawIntent.Query",
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "What would you like to ask Claw?"
+          },
+          {
+            "type": "PlainText",
+            "value": "What can I help you with?"
+          }
+        ]
+      }
+    ]
+  }
+}

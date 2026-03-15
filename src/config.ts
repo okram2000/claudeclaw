@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS: Settings = {
   telegram: { token: "", allowedUserIds: [] },
   discord: { token: "", allowedUserIds: [], listenChannels: [] },
   slack: { token: "", appToken: "", allowedUserIds: [], listenChannels: [] },
+  alexa: { enabled: false, port: 3456, skillId: "", allowedUserIds: [], skipVerification: false, tunnelType: "none" },
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
@@ -80,6 +81,17 @@ export interface SlackConfig {
   listenChannels: string[]; // Channel IDs where bot responds to all messages (no mention needed)
 }
 
+export type AlexaTunnelType = "cloudflared" | "ngrok" | "none";
+
+export interface AlexaConfig {
+  enabled: boolean;
+  port: number;
+  skillId: string;         // Alexa Skill ID from Developer Console (amzn1.ask.skill.*)
+  allowedUserIds: string[]; // Alexa user IDs to restrict access (empty = allow all)
+  skipVerification: boolean; // Disable signature verification for local dev (never in prod)
+  tunnelType: AlexaTunnelType;
+}
+
 export type SecurityLevel =
   | "locked"
   | "strict"
@@ -102,6 +114,7 @@ export interface Settings {
   telegram: TelegramConfig;
   discord: DiscordConfig;
   slack: SlackConfig;
+  alexa: AlexaConfig;
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
@@ -249,6 +262,18 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
       listenChannels: Array.isArray(raw.slack?.listenChannels)
         ? raw.slack.listenChannels.map(String)
         : [],
+    },
+    alexa: {
+      enabled: raw.alexa?.enabled ?? false,
+      port: Number.isFinite(raw.alexa?.port) ? Number(raw.alexa.port) : 3456,
+      skillId: typeof raw.alexa?.skillId === "string" ? raw.alexa.skillId.trim() : "",
+      allowedUserIds: Array.isArray(raw.alexa?.allowedUserIds)
+        ? raw.alexa.allowedUserIds.map(String)
+        : [],
+      skipVerification: raw.alexa?.skipVerification ?? false,
+      tunnelType: (["cloudflared", "ngrok", "none"] as const).includes(raw.alexa?.tunnelType)
+        ? raw.alexa.tunnelType as AlexaTunnelType
+        : "none",
     },
     security: {
       level,
