@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS: Settings = {
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
-  update: {
+update: {
     autoUpdate: false,
     checkInterval: "0 4 * * *",
     repo: "okram2000/claudeclaw",
@@ -45,6 +45,7 @@ const DEFAULT_SETTINGS: Settings = {
     defaultViewport: { width: 1280, height: 800 },
   },
   streaming: { enabled: false, updateInterval: 1000, platforms: ["discord", "telegram", "slack"] },
+homeassistant: { enabled: false, baseUrl: "", token: "", defaultEntities: [] },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -104,9 +105,10 @@ export interface Settings {
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
-  update: UpdateConfig;
+update: UpdateConfig;
   browser: BrowserConfig;
   streaming: StreamingConfig;
+homeassistant: HomeAssistantConfig;
 }
 
 export interface ModelConfig {
@@ -169,6 +171,14 @@ export interface StreamingConfig {
   updateInterval: number;
   /** Which platforms get streaming updates. Default: all. */
   platforms: string[];
+export interface HomeAssistantConfig {
+  enabled: boolean;
+  /** Base URL of the Home Assistant instance, e.g. "http://homeassistant.local:8123" */
+  baseUrl: string;
+  /** Long-lived access token from HA profile page */
+  token: string;
+  /** Entity IDs to highlight in status summaries (optional) */
+  defaultEntities: string[];
 }
 
 let cached: Settings | null = null;
@@ -258,7 +268,7 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
       model: typeof raw.stt?.model === "string" ? raw.stt.model.trim() : "",
     },
-    update: {
+update: {
       autoUpdate: raw.update?.autoUpdate ?? false,
       checkInterval: typeof raw.update?.checkInterval === "string" ? raw.update.checkInterval.trim() : "0 4 * * *",
       repo: typeof raw.update?.repo === "string" ? raw.update.repo.trim() : "okram2000/claudeclaw",
@@ -280,6 +290,13 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
       enabled: raw.streaming?.enabled ?? false,
       updateInterval: Number.isFinite(raw.streaming?.updateInterval) ? Math.max(500, Number(raw.streaming.updateInterval)) : 1000,
       platforms: Array.isArray(raw.streaming?.platforms) ? raw.streaming.platforms.map(String) : ["discord", "telegram", "slack"],
+homeassistant: {
+      enabled: raw.homeassistant?.enabled ?? false,
+      baseUrl: typeof raw.homeassistant?.baseUrl === "string" ? raw.homeassistant.baseUrl.trim() : "",
+      token: typeof raw.homeassistant?.token === "string" ? raw.homeassistant.token.trim() : "",
+      defaultEntities: Array.isArray(raw.homeassistant?.defaultEntities)
+        ? raw.homeassistant.defaultEntities.map(String)
+        : [],
     },
   };
 }
