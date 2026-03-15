@@ -27,6 +27,8 @@ const DEFAULT_SETTINGS: Settings = {
   telegram: { token: "", allowedUserIds: [] },
   discord: { token: "", allowedUserIds: [], listenChannels: [] },
   slack: { token: "", appToken: "", allowedUserIds: [], listenChannels: [] },
+  whatsapp: { allowedNumbers: [], groupsEnabled: false },
+  matrix: { homeserverUrl: "", accessToken: "", userId: "", allowedUserIds: [], listenRooms: [] },
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
@@ -64,6 +66,26 @@ export interface SlackConfig {
   listenChannels: string[]; // Channel IDs where bot responds to all messages (no mention needed)
 }
 
+export interface WhatsAppConfig {
+  /** Phone numbers in international format without +, e.g. "14155551234". Empty = all allowed. */
+  allowedNumbers: string[];
+  /** Whether to respond to messages in group chats (only when mentioned). */
+  groupsEnabled: boolean;
+}
+
+export interface MatrixConfig {
+  /** Homeserver URL, e.g. "https://matrix.org" */
+  homeserverUrl: string;
+  /** Bot access token */
+  accessToken: string;
+  /** Bot's Matrix user ID, e.g. "@bot:matrix.org" */
+  userId: string;
+  /** Allowed Matrix user IDs. Empty = all allowed. */
+  allowedUserIds: string[];
+  /** Room IDs where the bot responds to all messages (no mention needed). */
+  listenRooms: string[];
+}
+
 export type SecurityLevel =
   | "locked"
   | "strict"
@@ -86,6 +108,8 @@ export interface Settings {
   telegram: TelegramConfig;
   discord: DiscordConfig;
   slack: SlackConfig;
+  whatsapp: WhatsAppConfig;
+  matrix: MatrixConfig;
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
@@ -178,6 +202,23 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
         : [],
       listenChannels: Array.isArray(raw.slack?.listenChannels)
         ? raw.slack.listenChannels.map(String)
+        : [],
+    },
+    whatsapp: {
+      allowedNumbers: Array.isArray(raw.whatsapp?.allowedNumbers)
+        ? raw.whatsapp.allowedNumbers.map(String)
+        : [],
+      groupsEnabled: raw.whatsapp?.groupsEnabled ?? false,
+    },
+    matrix: {
+      homeserverUrl: typeof raw.matrix?.homeserverUrl === "string" ? raw.matrix.homeserverUrl.trim() : "",
+      accessToken: typeof raw.matrix?.accessToken === "string" ? raw.matrix.accessToken.trim() : "",
+      userId: typeof raw.matrix?.userId === "string" ? raw.matrix.userId.trim() : "",
+      allowedUserIds: Array.isArray(raw.matrix?.allowedUserIds)
+        ? raw.matrix.allowedUserIds.map(String)
+        : [],
+      listenRooms: Array.isArray(raw.matrix?.listenRooms)
+        ? raw.matrix.listenRooms.map(String)
         : [],
     },
     security: {

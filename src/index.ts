@@ -5,6 +5,8 @@ import { status } from "./commands/status";
 import { telegram } from "./commands/telegram";
 import { discord } from "./commands/discord";
 import { slack } from "./commands/slack";
+import { whatsapp } from "./commands/whatsapp";
+import { matrix } from "./commands/matrix";
 import { send } from "./commands/send";
 
 const args = process.argv.slice(2);
@@ -26,6 +28,10 @@ if (command === "--stop-all") {
   discord();
 } else if (command === "slack") {
   slack();
+} else if (command === "whatsapp") {
+  whatsapp();
+} else if (command === "matrix") {
+  matrix();
 } else if (command === "send") {
   send(args.slice(1));
 } else {
