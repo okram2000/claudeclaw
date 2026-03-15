@@ -10,7 +10,9 @@ export interface StateData {
   telegram: boolean;
   discord: boolean;
   slack: boolean;
-  alexa: boolean;
+alexa: boolean;
+whatsapp: boolean;
+  matrix: boolean;
   startedAt: number;
   web?: { enabled: boolean; host: string; port: number };
 }

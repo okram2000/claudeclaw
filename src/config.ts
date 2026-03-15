@@ -27,7 +27,9 @@ const DEFAULT_SETTINGS: Settings = {
   telegram: { token: "", allowedUserIds: [] },
   discord: { token: "", allowedUserIds: [], listenChannels: [] },
   slack: { token: "", appToken: "", allowedUserIds: [], listenChannels: [] },
-  alexa: { enabled: false, port: 3456, skillId: "", allowedUserIds: [], skipVerification: false, tunnelType: "none" },
+alexa: { enabled: false, port: 3456, skillId: "", allowedUserIds: [], skipVerification: false, tunnelType: "none" },
+whatsapp: { allowedNumbers: [], groupsEnabled: false },
+  matrix: { homeserverUrl: "", accessToken: "", userId: "", allowedUserIds: [], listenRooms: [] },
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
@@ -90,6 +92,24 @@ export interface AlexaConfig {
   allowedUserIds: string[]; // Alexa user IDs to restrict access (empty = allow all)
   skipVerification: boolean; // Disable signature verification for local dev (never in prod)
   tunnelType: AlexaTunnelType;
+export interface WhatsAppConfig {
+  /** Phone numbers in international format without +, e.g. "14155551234". Empty = all allowed. */
+  allowedNumbers: string[];
+  /** Whether to respond to messages in group chats (only when mentioned). */
+  groupsEnabled: boolean;
+}
+
+export interface MatrixConfig {
+  /** Homeserver URL, e.g. "https://matrix.org" */
+  homeserverUrl: string;
+  /** Bot access token */
+  accessToken: string;
+  /** Bot's Matrix user ID, e.g. "@bot:matrix.org" */
+  userId: string;
+  /** Allowed Matrix user IDs. Empty = all allowed. */
+  allowedUserIds: string[];
+  /** Room IDs where the bot responds to all messages (no mention needed). */
+  listenRooms: string[];
 }
 
 export type SecurityLevel =
@@ -114,7 +134,9 @@ export interface Settings {
   telegram: TelegramConfig;
   discord: DiscordConfig;
   slack: SlackConfig;
-  alexa: AlexaConfig;
+alexa: AlexaConfig;
+whatsapp: WhatsAppConfig;
+  matrix: MatrixConfig;
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
@@ -263,7 +285,7 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
         ? raw.slack.listenChannels.map(String)
         : [],
     },
-    alexa: {
+alexa: {
       enabled: raw.alexa?.enabled ?? false,
       port: Number.isFinite(raw.alexa?.port) ? Number(raw.alexa.port) : 3456,
       skillId: typeof raw.alexa?.skillId === "string" ? raw.alexa.skillId.trim() : "",
@@ -274,6 +296,22 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
       tunnelType: (["cloudflared", "ngrok", "none"] as const).includes(raw.alexa?.tunnelType)
         ? raw.alexa.tunnelType as AlexaTunnelType
         : "none",
+whatsapp: {
+      allowedNumbers: Array.isArray(raw.whatsapp?.allowedNumbers)
+        ? raw.whatsapp.allowedNumbers.map(String)
+        : [],
+      groupsEnabled: raw.whatsapp?.groupsEnabled ?? false,
+    },
+    matrix: {
+      homeserverUrl: typeof raw.matrix?.homeserverUrl === "string" ? raw.matrix.homeserverUrl.trim() : "",
+      accessToken: typeof raw.matrix?.accessToken === "string" ? raw.matrix.accessToken.trim() : "",
+      userId: typeof raw.matrix?.userId === "string" ? raw.matrix.userId.trim() : "",
+      allowedUserIds: Array.isArray(raw.matrix?.allowedUserIds)
+        ? raw.matrix.allowedUserIds.map(String)
+        : [],
+      listenRooms: Array.isArray(raw.matrix?.listenRooms)
+        ? raw.matrix.listenRooms.map(String)
+        : [],
     },
     security: {
       level,

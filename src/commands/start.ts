@@ -94,8 +94,14 @@ try {
     info.push(GREEN + "\\ud83d\\udcac" + R);
   }
 
-  if (state.alexa) {
+if (state.alexa) {
     info.push(GREEN + "\\ud83c\\udf99" + R);
+if (state.whatsapp) {
+    info.push(GREEN + "\\ud83d\\udcf1" + R);
+  }
+
+  if (state.matrix) {
+    info.push(GREEN + "\\ud83d\\udd37" + R);
   }
 
   var mid = " " + info.join(" " + B + " ") + " ";
@@ -210,7 +216,9 @@ export async function start(args: string[] = []) {
   let telegramFlag = false;
   let discordFlag = false;
   let slackFlag = false;
-  let alexaFlag = false;
+let alexaFlag = false;
+let whatsappFlag = false;
+  let matrixFlag = false;
   let debugFlag = false;
   let webFlag = false;
   let replaceExistingFlag = false;
@@ -229,8 +237,12 @@ export async function start(args: string[] = []) {
       discordFlag = true;
     } else if (arg === "--slack") {
       slackFlag = true;
-    } else if (arg === "--alexa") {
+} else if (arg === "--alexa") {
       alexaFlag = true;
+} else if (arg === "--whatsapp") {
+      whatsappFlag = true;
+    } else if (arg === "--matrix") {
+      matrixFlag = true;
     } else if (arg === "--debug") {
       debugFlag = true;
     } else if (arg === "--web") {
@@ -256,7 +268,8 @@ export async function start(args: string[] = []) {
   }
   const payload = payloadParts.join(" ").trim();
   if (hasPromptFlag && !payload) {
-    console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--alexa] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--alexa] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--whatsapp] [--matrix] [--debug] [--web] [--web-port <port>] [--replace-existing]");
     process.exit(1);
   }
   if (!hasPromptFlag && payload) {
@@ -275,8 +288,14 @@ export async function start(args: string[] = []) {
     console.error("`--slack` with `start` requires `--trigger`.");
     process.exit(1);
   }
-  if (alexaFlag && !hasTriggerFlag) {
+if (alexaFlag && !hasTriggerFlag) {
     console.error("`--alexa` with `start` requires `--trigger`.");
+if (whatsappFlag && !hasTriggerFlag) {
+    console.error("`--whatsapp` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (matrixFlag && !hasTriggerFlag) {
+    console.error("`--matrix` with `start` requires `--trigger`.");
     process.exit(1);
   }
   if (hasPromptFlag && !hasTriggerFlag && (webFlag || webPortFlag !== null)) {
@@ -342,14 +361,18 @@ export async function start(args: string[] = []) {
   let web: WebServerHandle | null = null;
   let discordStopGateway: (() => void) | null = null;
   let slackStopApp: (() => void) | null = null;
-  let alexaStopServer: (() => void) | null = null;
+let alexaStopServer: (() => void) | null = null;
   let alexaTunnelStop: (() => void) | null = null;
+let whatsappStopApp: (() => void) | null = null;
+  let matrixStopApp: (() => void) | null = null;
 
   async function shutdown() {
     if (discordStopGateway) discordStopGateway();
     if (slackStopApp) slackStopApp();
-    if (alexaStopServer) alexaStopServer();
+if (alexaStopServer) alexaStopServer();
     if (alexaTunnelStop) alexaTunnelStop();
+if (whatsappStopApp) whatsappStopApp();
+    if (matrixStopApp) matrixStopApp();
     if (web) web.stop();
     await teardownStatusline();
     await cleanupPidFile();
@@ -449,7 +472,7 @@ export async function start(args: string[] = []) {
   await initSlack(currentSettings.slack.token, currentSettings.slack.appToken);
   if (!slackToken) console.log("  Slack: not configured");
 
-  // --- Alexa ---
+// --- Alexa ---
   let alexaEnabled = false;
   let alexaPort = 0;
 
@@ -492,6 +515,55 @@ export async function start(args: string[] = []) {
   const alexaStartEnabled = alexaFlag || currentSettings.alexa.enabled;
   await initAlexa(alexaStartEnabled);
   if (!alexaEnabled) console.log("  Alexa: not configured");
+// --- WhatsApp ---
+  let whatsappSendToUser: ((phoneNumber: string, text: string) => Promise<void>) | null = null;
+  let whatsappConfigured = false;
+
+  async function initWhatsApp(allowedNumbers: string[]) {
+    const hasNumbers = allowedNumbers.length > 0;
+    if (hasNumbers && !whatsappConfigured) {
+      const { startApp, sendMessageToUser: waSendToUser, stopApp } = await import("./whatsapp");
+      startApp(debugFlag);
+      whatsappStopApp = stopApp;
+      whatsappSendToUser = (num, text) => waSendToUser(num, text);
+      whatsappConfigured = true;
+      console.log(`[${ts()}] WhatsApp: enabled`);
+    } else if (!hasNumbers && whatsappConfigured) {
+      if (whatsappStopApp) whatsappStopApp();
+      whatsappStopApp = null;
+      whatsappSendToUser = null;
+      whatsappConfigured = false;
+      console.log(`[${ts()}] WhatsApp: disabled`);
+    }
+  }
+
+  await initWhatsApp(currentSettings.whatsapp.allowedNumbers);
+  if (!whatsappConfigured) console.log("  WhatsApp: not configured (set whatsapp.allowedNumbers to enable forwarding)");
+
+  // --- Matrix ---
+  let matrixSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
+  let matrixToken = "";
+
+  async function initMatrix(accessToken: string, homeserverUrl: string, userId: string) {
+    if (accessToken && homeserverUrl && userId && accessToken !== matrixToken) {
+      const { startApp, sendMessageToUser: mxSendToUser, stopApp } = await import("./matrix");
+      if (matrixToken) stopApp();
+      startApp(debugFlag);
+      matrixStopApp = stopApp;
+      matrixSendToUser = (uid, text) => mxSendToUser(uid, text);
+      matrixToken = accessToken;
+      console.log(`[${ts()}] Matrix: enabled`);
+    } else if ((!accessToken || !homeserverUrl || !userId) && matrixToken) {
+      if (matrixStopApp) matrixStopApp();
+      matrixStopApp = null;
+      matrixSendToUser = null;
+      matrixToken = "";
+      console.log(`[${ts()}] Matrix: disabled`);
+    }
+  }
+
+  await initMatrix(currentSettings.matrix.accessToken, currentSettings.matrix.homeserverUrl, currentSettings.matrix.userId);
+  if (!matrixToken) console.log("  Matrix: not configured");
 
   function isAddrInUse(err: unknown): boolean {
     if (!err || typeof err !== "object") return false;
@@ -705,6 +777,30 @@ export async function start(args: string[] = []) {
     }
   }
 
+  function forwardToWhatsApp(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!whatsappSendToUser || currentSettings.whatsapp.allowedNumbers.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const number of currentSettings.whatsapp.allowedNumbers) {
+      whatsappSendToUser(number, text).catch((err) =>
+        console.error(`[WhatsApp] Failed to forward to ${number}: ${err}`)
+      );
+    }
+  }
+
+  function forwardToMatrix(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!matrixSendToUser || currentSettings.matrix.allowedUserIds.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const userId of currentSettings.matrix.allowedUserIds) {
+      matrixSendToUser(userId, text).catch((err) =>
+        console.error(`[Matrix] Failed to forward to ${userId}: ${err}`)
+      );
+    }
+  }
+
   // --- Heartbeat scheduling ---
   function scheduleHeartbeat() {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
@@ -755,6 +851,8 @@ export async function start(args: string[] = []) {
             forwardToTelegram("", r);
             forwardToDiscord("", r);
             forwardToSlack("", r);
+            forwardToWhatsApp("", r);
+            forwardToMatrix("", r);
           }
         });
       nextHeartbeatAt = nextAllowedHeartbeatAt(
@@ -781,6 +879,8 @@ export async function start(args: string[] = []) {
     if (telegramFlag) forwardToTelegram("", triggerResult);
     if (discordFlag) forwardToDiscord("", triggerResult);
     if (slackFlag) forwardToSlack("", triggerResult);
+    if (whatsappFlag) forwardToWhatsApp("", triggerResult);
+    if (matrixFlag) forwardToMatrix("", triggerResult);
     if (triggerResult.exitCode !== 0) {
       console.error(`[${ts()}] Startup trigger failed (exit ${triggerResult.exitCode}). Daemon will continue running.`);
     }
@@ -853,8 +953,13 @@ export async function start(args: string[] = []) {
       // Slack changes
       await initSlack(newSettings.slack.token, newSettings.slack.appToken);
 
-      // Alexa changes
+// Alexa changes
       await initAlexa(newSettings.alexa.enabled);
+// WhatsApp changes
+      await initWhatsApp(newSettings.whatsapp.allowedNumbers);
+
+      // Matrix changes
+      await initMatrix(newSettings.matrix.accessToken, newSettings.matrix.homeserverUrl, newSettings.matrix.userId);
     } catch (err) {
       console.error(`[${ts()}] Hot-reload error:`, err);
     }
@@ -875,7 +980,9 @@ export async function start(args: string[] = []) {
       telegram: !!currentSettings.telegram.token,
       discord: !!currentSettings.discord.token,
       slack: !!currentSettings.slack.token,
-      alexa: alexaEnabled,
+alexa: alexaEnabled,
+whatsapp: whatsappConfigured,
+      matrix: !!matrixToken,
       startedAt: daemonStartedAt,
       web: {
         enabled: !!web,
@@ -900,6 +1007,8 @@ export async function start(args: string[] = []) {
             forwardToTelegram(job.name, r);
             forwardToDiscord(job.name, r);
             forwardToSlack(job.name, r);
+            forwardToWhatsApp(job.name, r);
+            forwardToMatrix(job.name, r);
           })
           .finally(async () => {
             if (job.recurring) return;

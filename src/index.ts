@@ -7,6 +7,8 @@ import { discord } from "./commands/discord";
 import { slack } from "./commands/slack";
 import { home } from "./commands/home";
 import { alexa } from "./commands/alexa";
+import { whatsapp } from "./commands/whatsapp";
+import { matrix } from "./commands/matrix";
 import { send } from "./commands/send";
 import { update } from "./commands/update";
 
@@ -33,6 +35,10 @@ if (command === "--stop-all") {
   home(args.slice(1));
 } else if (command === "alexa") {
   alexa();
+} else if (command === "whatsapp") {
+  whatsapp();
+} else if (command === "matrix") {
+  matrix();
 } else if (command === "send") {
   send(args.slice(1));
 } else if (command === "update") {
