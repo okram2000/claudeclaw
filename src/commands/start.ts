@@ -6,7 +6,8 @@ import { writeState, type StateData } from "../statusline";
 import { cronMatches, nextCronMatch } from "../cron";
 import { clearJobSchedule, loadJobs } from "../jobs";
 import { writePidFile, cleanupPidFile, checkExistingDaemon } from "../pid";
-import { initConfig, loadSettings, reloadSettings, resolvePrompt, type HeartbeatConfig, type Settings } from "../config";
+import { initConfig, loadSettings, reloadSettings, resolvePrompt, type HeartbeatConfig, type Settings, type UpdateConfig } from "../config";
+import { checkForUpdates, applyUpdate, notifyChannels, restartDaemon, getPluginInstallPath, formatChangelog } from "../updater";
 import { getDayAndMinuteAtOffset } from "../timezone";
 import { startWebUi, type WebServerHandle } from "../web";
 import type { Job } from "../jobs";
@@ -533,6 +534,82 @@ export async function start(args: string[] = []) {
     }
   }
 
+  function checkUpdatesInBackground(updateConfig: UpdateConfig): void {
+    // Non-blocking update check on daemon start
+    Promise.resolve().then(async () => {
+      try {
+        const result = await checkForUpdates(updateConfig);
+
+        if (!result.updateAvailable) {
+          console.log(`[${ts()}] Update check: up to date (${result.latestSHA.slice(0, 8)})`);
+          return;
+        }
+
+        const changelog = formatChangelog(result.commits);
+        const notice = `ClaudeClaw update available: ${result.currentSHA?.slice(0, 8) ?? "?"} → ${result.latestSHA.slice(0, 8)}\n${changelog}\n\nRun: claudeclaw update`;
+        console.log(`[${ts()}] ${notice}`);
+
+        if (!updateConfig.autoUpdate) {
+          // Just notify — don't auto-apply
+          if (updateConfig.notifyOnUpdate) {
+            const channels = buildNotifyChannels();
+            await notifyChannels(channels, notice);
+          }
+          return;
+        }
+
+        // Auto-update: notify "updating..." then apply
+        if (updateConfig.notifyOnUpdate) {
+          const channels = buildNotifyChannels();
+          const msg = `Updating ClaudeClaw ${result.currentSHA?.slice(0, 8) ?? "?"} → ${result.latestSHA.slice(0, 8)}... back in a moment.`;
+          await notifyChannels(channels, msg);
+        }
+
+        console.log(`[${ts()}] Auto-updating ClaudeClaw...`);
+        const applyResult = await applyUpdate(updateConfig, (msg) => console.log(`[${ts()}] [update] ${msg}`));
+
+        if (!applyResult.success) {
+          const errMsg = `ClaudeClaw auto-update failed: ${applyResult.error}`;
+          console.error(`[${ts()}] ${errMsg}`);
+          if (updateConfig.notifyOnUpdate) {
+            const channels = buildNotifyChannels();
+            await notifyChannels(channels, errMsg);
+          }
+          return;
+        }
+
+        const successMsg = `ClaudeClaw updated: ${applyResult.previousSHA?.slice(0, 8) ?? "?"} → ${applyResult.newSHA.slice(0, 8)}. Restarting daemon...`;
+        console.log(`[${ts()}] ${successMsg}`);
+
+        if (updateConfig.notifyOnUpdate) {
+          const channels = buildNotifyChannels();
+          await notifyChannels(channels, successMsg);
+        }
+
+        // Small delay so notifications can be sent before we restart
+        await Bun.sleep(1500);
+        const installPath = getPluginInstallPath();
+        await restartDaemon(installPath, (msg) => console.log(`[${ts()}] [update] ${msg}`));
+      } catch (err) {
+        console.error(`[${ts()}] Update check error: ${err instanceof Error ? err.message : err}`);
+      }
+    });
+  }
+
+  function buildNotifyChannels() {
+    return {
+      telegram: currentSettings.telegram.token && telegramSend && currentSettings.telegram.allowedUserIds.length > 0
+        ? { send: (id: number, text: string) => telegramSend!(id, text), userIds: currentSettings.telegram.allowedUserIds }
+        : undefined,
+      discord: currentSettings.discord.token && discordSendToUser && currentSettings.discord.allowedUserIds.length > 0
+        ? { send: (id: string, text: string) => discordSendToUser!(id, text), userIds: currentSettings.discord.allowedUserIds }
+        : undefined,
+      slack: currentSettings.slack.token && slackSendToUser && currentSettings.slack.allowedUserIds.length > 0
+        ? { send: (id: string, text: string) => slackSendToUser!(id, text), userIds: currentSettings.slack.allowedUserIds }
+        : undefined,
+    };
+  }
+
   function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
     if (!telegramSend || currentSettings.telegram.allowedUserIds.length === 0) return;
     const text = result.exitCode === 0
@@ -656,6 +733,9 @@ export async function start(args: string[] = []) {
 
   // Install plugins without blocking daemon startup.
   startPreflightInBackground(process.cwd());
+
+  // Check for updates in background (non-blocking).
+  checkUpdatesInBackground(currentSettings.update);
 
   if (currentSettings.heartbeat.enabled) scheduleHeartbeat();
 

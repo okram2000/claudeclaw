@@ -6,6 +6,7 @@ import { telegram } from "./commands/telegram";
 import { discord } from "./commands/discord";
 import { slack } from "./commands/slack";
 import { send } from "./commands/send";
+import { update } from "./commands/update";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -28,6 +29,8 @@ if (command === "--stop-all") {
   slack();
 } else if (command === "send") {
   send(args.slice(1));
+} else if (command === "update") {
+  update(args.slice(1));
 } else {
   start();
 }
