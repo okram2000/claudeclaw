@@ -49,6 +49,11 @@ update: {
   },
   streaming: { enabled: false, updateInterval: 1000, platforms: ["discord", "telegram", "slack"] },
 homeassistant: { enabled: false, baseUrl: "", token: "", defaultEntities: [] },
+integrations: {
+    notion: { token: "", defaultDatabase: "" },
+    obsidian: { vaultPath: "" },
+    calendar: { url: "", username: "", password: "" },
+  },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -144,6 +149,7 @@ update: UpdateConfig;
   browser: BrowserConfig;
   streaming: StreamingConfig;
 homeassistant: HomeAssistantConfig;
+integrations: IntegrationsConfig;
 }
 
 export interface ModelConfig {
@@ -214,6 +220,29 @@ export interface HomeAssistantConfig {
   token: string;
   /** Entity IDs to highlight in status summaries (optional) */
   defaultEntities: string[];
+export interface NotionIntegrationConfig {
+  /** Notion integration token (secret_...) */
+  token: string;
+  /** Default database ID to use when none is specified */
+  defaultDatabase: string;
+}
+
+export interface ObsidianIntegrationConfig {
+  /** Absolute path to the Obsidian vault directory */
+  vaultPath: string;
+}
+
+export interface CalendarIntegrationConfig {
+  /** CalDAV server URL (e.g. https://nextcloud.example.com/remote.php/dav) */
+  url: string;
+  username: string;
+  password: string;
+}
+
+export interface IntegrationsConfig {
+  notion: NotionIntegrationConfig;
+  obsidian: ObsidianIntegrationConfig;
+  calendar: CalendarIntegrationConfig;
 }
 
 let cached: Settings | null = null;
@@ -360,6 +389,20 @@ homeassistant: {
       defaultEntities: Array.isArray(raw.homeassistant?.defaultEntities)
         ? raw.homeassistant.defaultEntities.map(String)
         : [],
+    },
+integrations: {
+      notion: {
+        token: typeof raw.integrations?.notion?.token === "string" ? raw.integrations.notion.token.trim() : "",
+        defaultDatabase: typeof raw.integrations?.notion?.defaultDatabase === "string" ? raw.integrations.notion.defaultDatabase.trim() : "",
+      },
+      obsidian: {
+        vaultPath: typeof raw.integrations?.obsidian?.vaultPath === "string" ? raw.integrations.obsidian.vaultPath.trim() : "",
+      },
+      calendar: {
+        url: typeof raw.integrations?.calendar?.url === "string" ? raw.integrations.calendar.url.trim() : "",
+        username: typeof raw.integrations?.calendar?.username === "string" ? raw.integrations.calendar.username.trim() : "",
+        password: typeof raw.integrations?.calendar?.password === "string" ? raw.integrations.calendar.password.trim() : "",
+      },
     },
   };
 }
