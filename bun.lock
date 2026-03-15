@@ -6,6 +6,7 @@
       "name": "claude-heartbeat",
       "dependencies": {
         "@slack/bolt": "^4.6.0",
+        "ask-sdk-core": "^2.14.0",
         "ogg-opus-decoder": "^1.7.3",
       },
       "devDependencies": {
@@ -63,6 +64,12 @@
     "@wasm-audio-decoders/opus-ml": ["@wasm-audio-decoders/opus-ml@0.0.2", "", { "dependencies": { "@wasm-audio-decoders/common": "9.0.7" } }, "sha512-58rWEqDGg+CKCyEeKm2KoxxSwTWtHh/NLTW9ObR4K8CGF6VwuuGudEI1CtniS/oSRmL1nJq/eh8MKARiluw4DQ=="],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
+
+    "ask-sdk-core": ["ask-sdk-core@2.14.0", "", { "dependencies": { "ask-sdk-runtime": "^2.14.0" }, "peerDependencies": { "ask-sdk-model": "^1.29.0" } }, "sha512-G2yEKbY+XYTFzJXGRpsg7xJHqqgBcgnKEgklXUMRWRFv10gwHgtWDLLlBV6h4IdysTx782rCVJK/UcHcaGbEpA=="],
+
+    "ask-sdk-model": ["ask-sdk-model@1.86.0", "", {}, "sha512-JmC5mypPBz5Q1Yx1WyeAr2Q/z2Cjm98EjLjTlYAolXF4gokU7fDDjeOAyAD5dkyHjyGLeCEvlC0MJYWFwc84dw=="],
+
+    "ask-sdk-runtime": ["ask-sdk-runtime@2.14.0", "", {}, "sha512-a96pPs1RU3GgXBHplqAVqh2uxEuSYjTD5+XSbHsf6Fz4KhHpgaxJogOIIybjA6O/d1B9sG+6bjHJGzxBJEcccA=="],
 
     "asynckit": ["asynckit@0.4.0", "", {}, "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q=="],
 

@@ -93,6 +93,10 @@ try {
     info.push(GREEN + "\\ud83d\\udcac" + R);
   }
 
+  if (state.alexa) {
+    info.push(GREEN + "\\ud83c\\udf99" + R);
+  }
+
   var mid = " " + info.join(" " + B + " ") + " ";
 
   process.stdout.write(HEADER + "\\n" + B + mid + B + "\\n" + FOOTER);
@@ -205,6 +209,7 @@ export async function start(args: string[] = []) {
   let telegramFlag = false;
   let discordFlag = false;
   let slackFlag = false;
+  let alexaFlag = false;
   let debugFlag = false;
   let webFlag = false;
   let replaceExistingFlag = false;
@@ -223,6 +228,8 @@ export async function start(args: string[] = []) {
       discordFlag = true;
     } else if (arg === "--slack") {
       slackFlag = true;
+    } else if (arg === "--alexa") {
+      alexaFlag = true;
     } else if (arg === "--debug") {
       debugFlag = true;
     } else if (arg === "--web") {
@@ -248,7 +255,7 @@ export async function start(args: string[] = []) {
   }
   const payload = payloadParts.join(" ").trim();
   if (hasPromptFlag && !payload) {
-    console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+    console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--alexa] [--debug] [--web] [--web-port <port>] [--replace-existing]");
     process.exit(1);
   }
   if (!hasPromptFlag && payload) {
@@ -265,6 +272,10 @@ export async function start(args: string[] = []) {
   }
   if (slackFlag && !hasTriggerFlag) {
     console.error("`--slack` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (alexaFlag && !hasTriggerFlag) {
+    console.error("`--alexa` with `start` requires `--trigger`.");
     process.exit(1);
   }
   if (hasPromptFlag && !hasTriggerFlag && (webFlag || webPortFlag !== null)) {
@@ -330,10 +341,14 @@ export async function start(args: string[] = []) {
   let web: WebServerHandle | null = null;
   let discordStopGateway: (() => void) | null = null;
   let slackStopApp: (() => void) | null = null;
+  let alexaStopServer: (() => void) | null = null;
+  let alexaTunnelStop: (() => void) | null = null;
 
   async function shutdown() {
     if (discordStopGateway) discordStopGateway();
     if (slackStopApp) slackStopApp();
+    if (alexaStopServer) alexaStopServer();
+    if (alexaTunnelStop) alexaTunnelStop();
     if (web) web.stop();
     await teardownStatusline();
     await cleanupPidFile();
@@ -432,6 +447,50 @@ export async function start(args: string[] = []) {
 
   await initSlack(currentSettings.slack.token, currentSettings.slack.appToken);
   if (!slackToken) console.log("  Slack: not configured");
+
+  // --- Alexa ---
+  let alexaEnabled = false;
+  let alexaPort = 0;
+
+  async function initAlexa(enabled: boolean) {
+    if (enabled && !alexaEnabled) {
+      const { startAlexaServer, stopAlexaServer } = await import("./alexa");
+      const { startTunnel, printManualTunnelInstructions } = await import("../alexa-tunnel");
+      startAlexaServer(debugFlag);
+      alexaStopServer = stopAlexaServer;
+      alexaEnabled = true;
+      alexaPort = currentSettings.alexa.port;
+      console.log(`[${ts()}] Alexa: enabled (port ${alexaPort})`);
+
+      // Start tunnel if configured
+      const tunnelType = currentSettings.alexa.tunnelType;
+      if (tunnelType !== "none") {
+        try {
+          const tunnel = await startTunnel(alexaPort, tunnelType);
+          if (tunnel) {
+            console.log(`[${ts()}] Alexa tunnel: ${tunnel.url}`);
+            console.log(`[${ts()}] Set this URL as your Alexa skill endpoint in the Developer Console`);
+            alexaTunnelStop = tunnel.stop;
+          } else {
+            printManualTunnelInstructions(alexaPort);
+          }
+        } catch (err) {
+          console.error(`[${ts()}] Alexa tunnel failed: ${err instanceof Error ? err.message : err}`);
+          printManualTunnelInstructions(alexaPort);
+        }
+      }
+    } else if (!enabled && alexaEnabled) {
+      if (alexaStopServer) alexaStopServer();
+      if (alexaTunnelStop) { alexaTunnelStop(); alexaTunnelStop = null; }
+      alexaStopServer = null;
+      alexaEnabled = false;
+      console.log(`[${ts()}] Alexa: disabled`);
+    }
+  }
+
+  const alexaStartEnabled = alexaFlag || currentSettings.alexa.enabled;
+  await initAlexa(alexaStartEnabled);
+  if (!alexaEnabled) console.log("  Alexa: not configured");
 
   function isAddrInUse(err: unknown): boolean {
     if (!err || typeof err !== "object") return false;
@@ -713,6 +772,9 @@ export async function start(args: string[] = []) {
 
       // Slack changes
       await initSlack(newSettings.slack.token, newSettings.slack.appToken);
+
+      // Alexa changes
+      await initAlexa(newSettings.alexa.enabled);
     } catch (err) {
       console.error(`[${ts()}] Hot-reload error:`, err);
     }
@@ -733,6 +795,7 @@ export async function start(args: string[] = []) {
       telegram: !!currentSettings.telegram.token,
       discord: !!currentSettings.discord.token,
       slack: !!currentSettings.slack.token,
+      alexa: alexaEnabled,
       startedAt: daemonStartedAt,
       web: {
         enabled: !!web,
