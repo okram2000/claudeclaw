@@ -33,7 +33,7 @@ const DEFAULT_SETTINGS: Settings = {
   update: {
     autoUpdate: false,
     checkInterval: "0 4 * * *",
-    repo: "moazbuilds/claudeclaw",
+    repo: "okram2000/claudeclaw",
     branch: "master",
     notifyOnUpdate: true,
   },
@@ -124,7 +124,7 @@ export interface UpdateConfig {
   autoUpdate: boolean;
   /** Cron expression for auto-update schedule. Default: "0 4 * * *" (4 AM daily). */
   checkInterval: string;
-  /** GitHub repo to pull updates from ("owner/repo"). Default: "moazbuilds/claudeclaw". */
+  /** GitHub repo to pull updates from ("owner/repo"). Default: "okram2000/claudeclaw". */
   repo: string;
   /** Branch to track. Default: "master". */
   branch: string;
@@ -224,7 +224,7 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
     update: {
       autoUpdate: raw.update?.autoUpdate ?? false,
       checkInterval: typeof raw.update?.checkInterval === "string" ? raw.update.checkInterval.trim() : "0 4 * * *",
-      repo: typeof raw.update?.repo === "string" ? raw.update.repo.trim() : "moazbuilds/claudeclaw",
+      repo: typeof raw.update?.repo === "string" ? raw.update.repo.trim() : "okram2000/claudeclaw",
       branch: typeof raw.update?.branch === "string" ? raw.update.branch.trim() : "master",
       notifyOnUpdate: raw.update?.notifyOnUpdate ?? true,
       githubToken: typeof raw.update?.githubToken === "string" ? raw.update.githubToken.trim() : undefined,

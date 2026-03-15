@@ -22,7 +22,7 @@ const UPDATE_STATE_FILE = join(HEARTBEAT_DIR, "update-state.json");
 const PLUGINS_DIR = join(homedir(), ".claude", "plugins");
 const INST_FILE = join(PLUGINS_DIR, "installed_plugins.json");
 
-export const DEFAULT_REPO = "moazbuilds/claudeclaw";
+export const DEFAULT_REPO = "okram2000/claudeclaw";
 export const DEFAULT_BRANCH = "master";
 
 // ── Types ──────────────────────────────────────────────────────────
