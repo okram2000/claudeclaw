@@ -30,6 +30,13 @@ const DEFAULT_SETTINGS: Settings = {
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
+  browser: {
+    enabled: false,
+    chromePath: "",
+    headless: true,
+    userDataDir: "",
+    defaultViewport: { width: 1280, height: 800 },
+  },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -89,6 +96,7 @@ export interface Settings {
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
+  browser: BrowserConfig;
 }
 
 export interface ModelConfig {
@@ -109,6 +117,24 @@ export interface SttConfig {
   baseUrl: string;
   /** Model name passed to the API (default: "Systran/faster-whisper-large-v3") */
   model: string;
+}
+
+export interface BrowserViewport {
+  width: number;
+  height: number;
+}
+
+export interface BrowserConfig {
+  /** Enable the browser automation module. */
+  enabled: boolean;
+  /** Path to the Chromium/Chrome executable. Auto-detected if empty. */
+  chromePath: string;
+  /** Run in headless mode (no visible window). Default: true. */
+  headless: boolean;
+  /** Directory for browser profile / session persistence. */
+  userDataDir: string;
+  /** Default viewport size. */
+  defaultViewport: BrowserViewport;
 }
 
 let cached: Settings | null = null;
@@ -197,6 +223,16 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
     stt: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
       model: typeof raw.stt?.model === "string" ? raw.stt.model.trim() : "",
+    },
+    browser: {
+      enabled: raw.browser?.enabled ?? false,
+      chromePath: typeof raw.browser?.chromePath === "string" ? raw.browser.chromePath.trim() : "",
+      headless: raw.browser?.headless ?? true,
+      userDataDir: typeof raw.browser?.userDataDir === "string" ? raw.browser.userDataDir.trim() : "",
+      defaultViewport: {
+        width: Number.isFinite(raw.browser?.defaultViewport?.width) ? Number(raw.browser.defaultViewport.width) : 1280,
+        height: Number.isFinite(raw.browser?.defaultViewport?.height) ? Number(raw.browser.defaultViewport.height) : 800,
+      },
     },
   };
 }
