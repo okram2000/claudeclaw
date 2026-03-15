@@ -14,7 +14,9 @@
     "@types/bun": "^1.3.9"
   },
   "dependencies": {
+    "@notionhq/client": "^2.2.15",
     "@slack/bolt": "^4.6.0",
-    "ogg-opus-decoder": "^1.7.3"
+    "ogg-opus-decoder": "^1.7.3",
+    "tsdav": "^2.0.10"
   }
 }

@@ -30,6 +30,11 @@ const DEFAULT_SETTINGS: Settings = {
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
+  integrations: {
+    notion: { token: "", defaultDatabase: "" },
+    obsidian: { vaultPath: "" },
+    calendar: { url: "", username: "", password: "" },
+  },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -89,6 +94,7 @@ export interface Settings {
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
+  integrations: IntegrationsConfig;
 }
 
 export interface ModelConfig {
@@ -109,6 +115,31 @@ export interface SttConfig {
   baseUrl: string;
   /** Model name passed to the API (default: "Systran/faster-whisper-large-v3") */
   model: string;
+}
+
+export interface NotionIntegrationConfig {
+  /** Notion integration token (secret_...) */
+  token: string;
+  /** Default database ID to use when none is specified */
+  defaultDatabase: string;
+}
+
+export interface ObsidianIntegrationConfig {
+  /** Absolute path to the Obsidian vault directory */
+  vaultPath: string;
+}
+
+export interface CalendarIntegrationConfig {
+  /** CalDAV server URL (e.g. https://nextcloud.example.com/remote.php/dav) */
+  url: string;
+  username: string;
+  password: string;
+}
+
+export interface IntegrationsConfig {
+  notion: NotionIntegrationConfig;
+  obsidian: ObsidianIntegrationConfig;
+  calendar: CalendarIntegrationConfig;
 }
 
 let cached: Settings | null = null;
@@ -197,6 +228,20 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
     stt: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
       model: typeof raw.stt?.model === "string" ? raw.stt.model.trim() : "",
+    },
+    integrations: {
+      notion: {
+        token: typeof raw.integrations?.notion?.token === "string" ? raw.integrations.notion.token.trim() : "",
+        defaultDatabase: typeof raw.integrations?.notion?.defaultDatabase === "string" ? raw.integrations.notion.defaultDatabase.trim() : "",
+      },
+      obsidian: {
+        vaultPath: typeof raw.integrations?.obsidian?.vaultPath === "string" ? raw.integrations.obsidian.vaultPath.trim() : "",
+      },
+      calendar: {
+        url: typeof raw.integrations?.calendar?.url === "string" ? raw.integrations.calendar.url.trim() : "",
+        username: typeof raw.integrations?.calendar?.username === "string" ? raw.integrations.calendar.username.trim() : "",
+        password: typeof raw.integrations?.calendar?.password === "string" ? raw.integrations.calendar.password.trim() : "",
+      },
     },
   };
 }
