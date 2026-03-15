@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: Settings = {
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
+  streaming: { enabled: false, updateInterval: 1000, platforms: ["discord", "telegram", "slack"] },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -89,6 +90,7 @@ export interface Settings {
   security: SecurityConfig;
   web: WebConfig;
   stt: SttConfig;
+  streaming: StreamingConfig;
 }
 
 export interface ModelConfig {
@@ -109,6 +111,15 @@ export interface SttConfig {
   baseUrl: string;
   /** Model name passed to the API (default: "Systran/faster-whisper-large-v3") */
   model: string;
+}
+
+export interface StreamingConfig {
+  /** Enable progressive message updates while Claude is generating. */
+  enabled: boolean;
+  /** Minimum ms between message edits (platform rate limit guard). Default: 1000 */
+  updateInterval: number;
+  /** Which platforms get streaming updates. Default: all. */
+  platforms: string[];
 }
 
 let cached: Settings | null = null;
@@ -197,6 +208,11 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
     stt: {
       baseUrl: typeof raw.stt?.baseUrl === "string" ? raw.stt.baseUrl.trim() : "",
       model: typeof raw.stt?.model === "string" ? raw.stt.model.trim() : "",
+    },
+    streaming: {
+      enabled: raw.streaming?.enabled ?? false,
+      updateInterval: Number.isFinite(raw.streaming?.updateInterval) ? Math.max(500, Number(raw.streaming.updateInterval)) : 1000,
+      platforms: Array.isArray(raw.streaming?.platforms) ? raw.streaming.platforms.map(String) : ["discord", "telegram", "slack"],
     },
   };
 }

@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, runUserMessageStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -620,7 +620,101 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       );
     }
     const prefixedPrompt = promptParts.join("\n");
-    const result = await runUserMessage("telegram", prefixedPrompt);
+    const streamingConfig = getSettings().streaming;
+    const useStreaming = streamingConfig.enabled && streamingConfig.platforms.includes("telegram");
+
+    let result;
+    if (useStreaming) {
+      // Send initial placeholder message
+      let placeholderMsgId: number | null = null;
+      try {
+        const sent = await callApi<{ ok: boolean; result: { message_id: number } }>(config.token, "sendMessage", {
+          chat_id: chatId,
+          text: "...",
+          ...(threadId ? { message_thread_id: threadId } : {}),
+        });
+        if (sent.ok) placeholderMsgId = sent.result.message_id;
+      } catch {
+        // placeholder send failed
+      }
+
+      if (placeholderMsgId === null) {
+        result = await runUserMessage("telegram", prefixedPrompt);
+      } else {
+        clearInterval(typingInterval);
+
+        const intervalMs = Math.max(1000, streamingConfig.updateInterval);
+        let lastEditAt = Date.now();
+        let editTimer: ReturnType<typeof setTimeout> | null = null;
+        let latestText = "";
+
+        const editPlaceholder = async (text: string) => {
+          const normalized = normalizeTelegramText(text).replace(/\[react:[^\]\r\n]+\]/gi, "");
+          const html = markdownToTelegramHtml(normalized);
+          const MAX_LEN = 4000;
+          const display = html.length > MAX_LEN ? html.slice(0, MAX_LEN) + "…" : html;
+          await callApi(config.token, "editMessageText", {
+            chat_id: chatId,
+            message_id: placeholderMsgId,
+            text: display,
+            parse_mode: "HTML",
+          }).catch(() => {});
+        };
+
+        const onText = (text: string) => {
+          latestText = text;
+          const now = Date.now();
+          const elapsed = now - lastEditAt;
+          if (elapsed >= intervalMs) {
+            lastEditAt = now;
+            editPlaceholder(text);
+          } else if (!editTimer) {
+            editTimer = setTimeout(() => {
+              editTimer = null;
+              lastEditAt = Date.now();
+              editPlaceholder(latestText);
+            }, intervalMs - elapsed);
+          }
+        };
+
+        result = await runUserMessageStreaming("telegram", prefixedPrompt, onText);
+
+        if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+
+        if (result.exitCode !== 0) {
+          await editPlaceholder(`Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`);
+        } else {
+          const { cleanedText, reactionEmoji } = extractReactionDirective(result.stdout || "");
+          if (reactionEmoji) {
+            await sendReaction(config.token, chatId, message.message_id, reactionEmoji).catch(() => {});
+          }
+          const finalText = cleanedText || "(empty response)";
+          // Edit the first chunk in place, send overflow as new messages
+          const normalized = normalizeTelegramText(finalText).replace(/\[react:[^\]\r\n]+\]/gi, "");
+          const html = markdownToTelegramHtml(normalized);
+          const MAX_LEN = 4096;
+          await callApi(config.token, "editMessageText", {
+            chat_id: chatId,
+            message_id: placeholderMsgId,
+            text: html.slice(0, MAX_LEN),
+            parse_mode: "HTML",
+          }).catch(async () => {
+            // HTML parse failed — retry as plain text
+            await callApi(config.token, "editMessageText", {
+              chat_id: chatId,
+              message_id: placeholderMsgId,
+              text: normalized.slice(0, MAX_LEN),
+            }).catch(() => {});
+          });
+          for (let i = MAX_LEN; i < html.length; i += MAX_LEN) {
+            await sendMessage(config.token, chatId, finalText.slice(i, i + MAX_LEN), threadId);
+          }
+        }
+        return;
+      }
+    } else {
+      result = await runUserMessage("telegram", prefixedPrompt);
+    }
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);

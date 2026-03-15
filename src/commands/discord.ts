@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, runUserMessageStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -458,7 +458,87 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
     }
 
     const prefixedPrompt = promptParts.join("\n");
-    const result = await runUserMessage("discord", prefixedPrompt);
+    const streamingConfig = getSettings().streaming;
+    const useStreaming = streamingConfig.enabled && streamingConfig.platforms.includes("discord");
+
+    let result;
+    if (useStreaming) {
+      // Send initial placeholder and progressively edit it
+      const placeholder = await discordApi<{ id: string }>(
+        config.token, "POST", `/channels/${channelId}/messages`, { content: "..." }
+      ).catch(() => null);
+
+      if (!placeholder) {
+        // Placeholder send failed — fall back to non-streaming
+        result = await runUserMessage("discord", prefixedPrompt);
+      } else {
+        clearInterval(typingInterval); // no need for typing while we have the placeholder
+
+        const placeholderMsgId = placeholder.id;
+        const intervalMs = Math.max(1000, streamingConfig.updateInterval);
+        let lastEditAt = Date.now();
+        let editTimer: ReturnType<typeof setTimeout> | null = null;
+        let latestText = "";
+
+        const editPlaceholder = async (text: string) => {
+          const MAX_LEN = 1900;
+          const display = text.length > MAX_LEN ? text.slice(0, MAX_LEN) + "…" : text;
+          await discordApi(config.token, "PATCH", `/channels/${channelId}/messages/${placeholderMsgId}`, {
+            content: display,
+          }).catch(() => {});
+        };
+
+        const onText = (text: string) => {
+          latestText = text;
+          const now = Date.now();
+          const elapsed = now - lastEditAt;
+          if (elapsed >= intervalMs) {
+            lastEditAt = now;
+            editPlaceholder(text);
+          } else if (!editTimer) {
+            editTimer = setTimeout(() => {
+              editTimer = null;
+              lastEditAt = Date.now();
+              editPlaceholder(latestText);
+            }, intervalMs - elapsed);
+          }
+        };
+
+        result = await runUserMessageStreaming("discord", prefixedPrompt, onText);
+
+        if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+
+        // Final: edit placeholder with complete response (handle >2000 chars)
+        if (result.exitCode !== 0) {
+          await editPlaceholder(`Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`);
+        } else {
+          const { cleanedText, reactionEmoji } = extractReactionDirective(result.stdout || "");
+          if (reactionEmoji) {
+            await sendReaction(config.token, channelId, message.id, reactionEmoji).catch(() => {});
+          }
+          const finalText = cleanedText || "(empty response)";
+          const MAX_LEN = 2000;
+          if (finalText.length <= MAX_LEN) {
+            await discordApi(config.token, "PATCH", `/channels/${channelId}/messages/${placeholderMsgId}`, {
+              content: finalText,
+            }).catch(() => {});
+          } else {
+            // Edit first chunk, send the rest as new messages
+            await discordApi(config.token, "PATCH", `/channels/${channelId}/messages/${placeholderMsgId}`, {
+              content: finalText.slice(0, MAX_LEN),
+            }).catch(() => {});
+            for (let i = MAX_LEN; i < finalText.length; i += MAX_LEN) {
+              await discordApi(config.token, "POST", `/channels/${channelId}/messages`, {
+                content: finalText.slice(i, i + MAX_LEN),
+              }).catch(() => {});
+            }
+          }
+        }
+        return; // done — skip the non-streaming send below
+      }
+    } else {
+      result = await runUserMessage("discord", prefixedPrompt);
+    }
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, channelId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`);

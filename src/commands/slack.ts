@@ -1,5 +1,5 @@
 import { App as BoltApp, LogLevel } from "@slack/bolt";
-import { ensureProjectClaudeMd, runUserMessage } from "../runner";
+import { ensureProjectClaudeMd, runUserMessage, runUserMessageStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -258,7 +258,100 @@ async function handleIncomingMessage(params: {
     }
 
     const prefixedPrompt = promptParts.join("\n");
-    const result = await runUserMessage("slack", prefixedPrompt);
+    const streamingConfig = getSettings().streaming;
+    const useStreaming = streamingConfig.enabled && streamingConfig.platforms.includes("slack");
+
+    let result;
+    if (useStreaming) {
+      // Post initial placeholder message
+      let placeholderTs: string | null = null;
+      try {
+        if (!app) throw new Error("Slack app not initialized");
+        const posted = await app.client.chat.postMessage({
+          token: config.token,
+          channel: channelId,
+          text: "...",
+          ...(replyThreadTs ? { thread_ts: replyThreadTs } : {}),
+        });
+        placeholderTs = typeof posted.ts === "string" ? posted.ts : null;
+      } catch {
+        // placeholder send failed
+      }
+
+      if (!placeholderTs || !app) {
+        result = await runUserMessage("slack", prefixedPrompt);
+      } else {
+        const intervalMs = Math.max(1000, streamingConfig.updateInterval);
+        let lastEditAt = Date.now();
+        let editTimer: ReturnType<typeof setTimeout> | null = null;
+        let latestText = "";
+
+        const editPlaceholder = async (text: string) => {
+          if (!app) return;
+          const normalized = text.replace(/\[react:[^\]\r\n]+\]/gi, "").trim();
+          const MAX_LEN = 2900;
+          const display = normalized.length > MAX_LEN ? normalized.slice(0, MAX_LEN) + "…" : normalized;
+          await app.client.chat.update({
+            token: config.token,
+            channel: channelId,
+            ts: placeholderTs!,
+            text: display,
+          }).catch(() => {});
+        };
+
+        const onText = (text: string) => {
+          latestText = text;
+          const now = Date.now();
+          const elapsed = now - lastEditAt;
+          if (elapsed >= intervalMs) {
+            lastEditAt = now;
+            editPlaceholder(text);
+          } else if (!editTimer) {
+            editTimer = setTimeout(() => {
+              editTimer = null;
+              lastEditAt = Date.now();
+              editPlaceholder(latestText);
+            }, intervalMs - elapsed);
+          }
+        };
+
+        result = await runUserMessageStreaming("slack", prefixedPrompt, onText);
+
+        if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+
+        await removeReaction(channelId, messageTs, "eyes");
+
+        if (result.exitCode !== 0) {
+          await editPlaceholder(`Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`);
+        } else {
+          const { cleanedText, reactionEmoji } = extractReactionDirective(result.stdout || "");
+          if (reactionEmoji) {
+            const emojiName = reactionEmoji.replace(/^:|:$/g, "");
+            await addReaction(channelId, messageTs, emojiName).catch(() => {});
+          } else {
+            await addReaction(channelId, messageTs, "white_check_mark").catch(() => {});
+          }
+          const finalText = (cleanedText || "(empty response)").replace(/\[react:[^\]\r\n]+\]/gi, "").trim();
+          const MAX_LEN = 3000;
+          // Edit first chunk in place
+          if (app) {
+            await app.client.chat.update({
+              token: config.token,
+              channel: channelId,
+              ts: placeholderTs!,
+              text: finalText.slice(0, MAX_LEN),
+            }).catch(() => {});
+          }
+          // Overflow as new messages
+          for (let i = MAX_LEN; i < finalText.length; i += MAX_LEN) {
+            await sendMessage(channelId, finalText.slice(i, i + MAX_LEN), replyThreadTs);
+          }
+        }
+        return;
+      }
+    } else {
+      result = await runUserMessage("slack", prefixedPrompt);
+    }
 
     await removeReaction(channelId, messageTs, "eyes");
 
