@@ -361,6 +361,220 @@ export async function runUserMessage(name: string, prompt: string): Promise<RunR
   return run(name, prefixUserMessageWithClock(prompt));
 }
 
+// --- Streaming support ---
+
+/** Parse NDJSON stream-json output and extract the final result text + session_id. */
+function parseStreamJsonOutput(rawOutput: string): { text: string; sessionId: string | null; isError: boolean } {
+  let text = "";
+  let sessionId: string | null = null;
+  let isError = false;
+  for (const line of rawOutput.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event.type === "result") {
+        text = String(event.result ?? "");
+        sessionId = typeof event.session_id === "string" ? event.session_id : null;
+        isError = event.is_error ?? false;
+      }
+    } catch {
+      // not JSON
+    }
+  }
+  return { text, sessionId, isError };
+}
+
+/** Extract visible text from an assistant event's content array. */
+function extractAssistantText(content: unknown[]): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+    .map((c: any) => c.text as string)
+    .join("");
+}
+
+async function execClaudeStreaming(
+  name: string,
+  prompt: string,
+  onText: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  await mkdir(LOGS_DIR, { recursive: true });
+
+  const existing = await getSession();
+  const isNew = !existing;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logFile = join(LOGS_DIR, `${name}-${timestamp}.log`);
+
+  const { security, model, api, fallback } = getSettings();
+  const primaryConfig: ModelConfig = { model, api };
+  const fallbackConfig: ModelConfig = {
+    model: fallback?.model ?? "",
+    api: fallback?.api ?? "",
+  };
+  const securityArgs = buildSecurityArgs(security);
+
+  console.log(
+    `[${new Date().toLocaleTimeString()}] Streaming: ${name} (${isNew ? "new session" : `resume ${existing!.sessionId.slice(0, 8)}`}, security: ${security.level})`
+  );
+
+  // Always use stream-json — gives us the session_id in the result event
+  const args = ["claude", "-p", prompt, "--output-format", "stream-json", ...securityArgs];
+  if (!isNew) args.push("--resume", existing!.sessionId);
+
+  const promptContent = await loadPrompts();
+  const appendParts: string[] = ["You are running inside ClaudeClaw."];
+  if (promptContent) appendParts.push(promptContent);
+  if (existsSync(PROJECT_CLAUDE_MD)) {
+    try {
+      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
+      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
+    } catch (e) {
+      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
+    }
+  }
+  if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
+  if (appendParts.length > 0) args.push("--append-system-prompt", appendParts.join("\n\n"));
+
+  const { CLAUDECODE: _, ...cleanEnv } = process.env;
+  const baseEnv = { ...cleanEnv } as Record<string, string>;
+
+  const childEnv = buildChildEnv(baseEnv, primaryConfig.model, primaryConfig.api);
+  const normalizedModel = primaryConfig.model.trim().toLowerCase();
+  const fullArgs = [...args];
+  if (primaryConfig.model.trim() && normalizedModel !== "glm") {
+    fullArgs.push("--model", primaryConfig.model.trim());
+  }
+
+  const proc = Bun.spawn(fullArgs, { stdout: "pipe", stderr: "pipe", env: childEnv });
+
+  const stderrPromise = new Response(proc.stderr).text();
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let lineBuffer = "";
+  let finalResultText = "";
+  let resultSessionId: string | null = null;
+  let resultIsError = false;
+
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        proc.kill();
+        break;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed);
+          if (event.type === "assistant" && event.message?.content) {
+            const text = extractAssistantText(event.message.content);
+            if (text) onText(text);
+          } else if (event.type === "result") {
+            finalResultText = String(event.result ?? "");
+            resultSessionId = typeof event.session_id === "string" ? event.session_id : null;
+            resultIsError = event.is_error ?? false;
+          }
+        } catch {
+          // not JSON
+        }
+      }
+    }
+    // Process any remaining buffer
+    if (lineBuffer.trim()) {
+      try {
+        const event = JSON.parse(lineBuffer.trim());
+        if (event.type === "result") {
+          finalResultText = String(event.result ?? "");
+          resultSessionId = typeof event.session_id === "string" ? event.session_id : null;
+          resultIsError = event.is_error ?? false;
+        }
+      } catch {}
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  await proc.exited;
+  const stderr = await stderrPromise;
+  const exitCode = proc.exitCode ?? 1;
+
+  // Handle session creation for new sessions
+  if (isNew && resultSessionId) {
+    await createSession(resultSessionId);
+    console.log(`[${new Date().toLocaleTimeString()}] Session created (streaming): ${resultSessionId}`);
+  }
+
+  let stdout = finalResultText;
+
+  // Rate limit detection → retry with fallback (non-streaming)
+  const rateLimitMessage = extractRateLimitMessage(stdout, stderr);
+  let usedFallback = false;
+  if (rateLimitMessage && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
+    console.warn(
+      `[${new Date().toLocaleTimeString()}] Claude limit reached (streaming); retrying with fallback...`
+    );
+    const fbArgs = [...args];
+    if (fallbackConfig.model.trim() && fallbackConfig.model.trim().toLowerCase() !== "glm") {
+      fbArgs.push("--model", fallbackConfig.model.trim());
+    }
+    const fbExec = await runClaudeOnce(fbArgs, fallbackConfig.model, fallbackConfig.api, baseEnv);
+    const parsed = parseStreamJsonOutput(fbExec.rawStdout);
+    stdout = parsed.text || extractRateLimitMessage(fbExec.rawStdout, fbExec.stderr) || fbExec.rawStdout;
+    if (parsed.sessionId && isNew) {
+      await createSession(parsed.sessionId);
+    }
+    usedFallback = true;
+    // Notify caller with the fallback result so the platform can update
+    if (stdout) onText(stdout);
+  }
+
+  const result: RunResult = { stdout, stderr, exitCode };
+
+  const sessionIdForLog = resultSessionId ?? existing?.sessionId ?? "unknown";
+  const output = [
+    `# ${name}`,
+    `Date: ${new Date().toISOString()}`,
+    `Session: ${sessionIdForLog} (${isNew ? "new" : "resumed"})`,
+    `Model config: ${usedFallback ? "fallback" : "primary"} [streaming]`,
+    `Prompt: ${prompt}`,
+    `Exit code: ${result.exitCode}`,
+    "",
+    "## Output",
+    stdout,
+    ...(stderr ? ["## Stderr", stderr] : []),
+  ].join("\n");
+
+  await Bun.write(logFile, output);
+  console.log(`[${new Date().toLocaleTimeString()}] Done (streaming): ${name} → ${logFile}`);
+
+  return result;
+}
+
+/**
+ * Run a user message with streaming output.
+ * `onText` is called with accumulated assistant text as it arrives.
+ * Returns the final RunResult (stdout = complete response).
+ * Falls back to non-streaming on rate limit.
+ */
+export async function runUserMessageStreaming(
+  name: string,
+  prompt: string,
+  onText: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  return enqueue(() => execClaudeStreaming(name, prefixUserMessageWithClock(prompt), onText, signal));
+}
+
 /**
  * Bootstrap the session: fires Claude with the system prompt so the
  * session is created immediately. No-op if a session already exists.

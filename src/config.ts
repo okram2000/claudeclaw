@@ -44,6 +44,7 @@ const DEFAULT_SETTINGS: Settings = {
     userDataDir: "",
     defaultViewport: { width: 1280, height: 800 },
   },
+  streaming: { enabled: false, updateInterval: 1000, platforms: ["discord", "telegram", "slack"] },
 };
 
 export interface HeartbeatExcludeWindow {
@@ -105,6 +106,7 @@ export interface Settings {
   stt: SttConfig;
   update: UpdateConfig;
   browser: BrowserConfig;
+  streaming: StreamingConfig;
 }
 
 export interface ModelConfig {
@@ -158,6 +160,15 @@ export interface BrowserConfig {
   userDataDir: string;
   /** Default viewport size. */
   defaultViewport: BrowserViewport;
+}
+
+export interface StreamingConfig {
+  /** Enable progressive message updates while Claude is generating. */
+  enabled: boolean;
+  /** Minimum ms between message edits (platform rate limit guard). Default: 1000 */
+  updateInterval: number;
+  /** Which platforms get streaming updates. Default: all. */
+  platforms: string[];
 }
 
 let cached: Settings | null = null;
@@ -264,6 +275,11 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
         width: Number.isFinite(raw.browser?.defaultViewport?.width) ? Number(raw.browser.defaultViewport.width) : 1280,
         height: Number.isFinite(raw.browser?.defaultViewport?.height) ? Number(raw.browser.defaultViewport.height) : 800,
       },
+    },
+    streaming: {
+      enabled: raw.streaming?.enabled ?? false,
+      updateInterval: Number.isFinite(raw.streaming?.updateInterval) ? Math.max(500, Number(raw.streaming.updateInterval)) : 1000,
+      platforms: Array.isArray(raw.streaming?.platforms) ? raw.streaming.platforms.map(String) : ["discord", "telegram", "slack"],
     },
   };
 }
