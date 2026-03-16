@@ -259,9 +259,21 @@ function isVoiceAttachment(a: DiscordAttachment): boolean {
   return Boolean(a.content_type?.startsWith("audio/"));
 }
 
+function isDocumentAttachment(a: DiscordAttachment): boolean {
+  const textTypes = ["text/", "application/json", "application/xml", "application/javascript",
+    "application/typescript", "application/x-yaml", "application/yaml", "application/toml"];
+  if (a.content_type && textTypes.some(t => a.content_type!.startsWith(t))) return true;
+  // Fallback: check file extension for common text formats
+  const textExts = [".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".log",
+    ".ts", ".js", ".py", ".sh", ".bash", ".zsh", ".rs", ".go", ".java", ".c", ".cpp", ".h",
+    ".html", ".css", ".scss", ".less", ".sql", ".env", ".ini", ".cfg", ".conf", ".properties"];
+  const ext = extname(a.filename).toLowerCase();
+  return textExts.includes(ext);
+}
+
 async function downloadDiscordAttachment(
   attachment: DiscordAttachment,
-  type: "image" | "voice",
+  type: "image" | "voice" | "document",
 ): Promise<string | null> {
   const dir = join(process.cwd(), ".claude", "claudeclaw", "inbox", "discord");
   await mkdir(dir, { recursive: true });
@@ -269,7 +281,7 @@ async function downloadDiscordAttachment(
   const response = await fetch(attachment.url);
   if (!response.ok) throw new Error(`Discord attachment download failed: ${response.status}`);
 
-  const ext = extname(attachment.filename) || (type === "voice" ? ".ogg" : ".jpg");
+  const ext = extname(attachment.filename) || (type === "voice" ? ".ogg" : type === "document" ? ".txt" : ".jpg");
   const filename = `${attachment.id}-${Date.now()}${ext}`;
   const localPath = join(dir, filename);
 
@@ -362,10 +374,12 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   // Detect attachments
   const imageAttachments = message.attachments.filter(isImageAttachment);
   const voiceAttachments = message.attachments.filter(isVoiceAttachment);
+  const documentAttachments = message.attachments.filter(isDocumentAttachment);
   const hasImage = imageAttachments.length > 0;
   const hasVoice = voiceAttachments.length > 0;
+  const hasDocument = documentAttachments.length > 0;
 
-  if (!content.trim() && !hasImage && !hasVoice) return;
+  if (!content.trim() && !hasImage && !hasVoice && !hasDocument) return;
 
   // Strip bot mention from content for cleaner prompt
   let cleanContent = content;
@@ -374,7 +388,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   }
 
   const label = message.author.username;
-  const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : ""].filter(Boolean);
+  const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : "", hasDocument ? "document" : ""].filter(Boolean);
   const mediaSuffix = mediaParts.length > 0 ? ` [${mediaParts.join("+")}]` : "";
   console.log(
     `[${new Date().toLocaleTimeString()}] Discord ${label}${mediaSuffix}: "${cleanContent.slice(0, 60)}${cleanContent.length > 60 ? "..." : ""}"`,
@@ -389,6 +403,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
     let imagePath: string | null = null;
     let voicePath: string | null = null;
     let voiceTranscript: string | null = null;
+    const documentPaths: { path: string; filename: string; content: string }[] = [];
 
     if (hasImage) {
       try {
@@ -414,6 +429,26 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
           });
         } catch (err) {
           console.error(`[Discord] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    }
+
+    if (hasDocument) {
+      for (const docAttachment of documentAttachments) {
+        try {
+          const docPath = await downloadDiscordAttachment(docAttachment, "document");
+          if (docPath) {
+            const file = Bun.file(docPath);
+            const text = await file.text();
+            // Limit content to 50k chars to avoid prompt overflow
+            const truncated = text.length > 50000
+              ? text.slice(0, 50000) + `\n... [truncated, ${text.length} total chars]`
+              : text;
+            documentPaths.push({ path: docPath, filename: docAttachment.filename, content: truncated });
+            debugLog(`Document downloaded and read: ${docAttachment.filename} (${text.length} chars)`);
+          }
+        } catch (err) {
+          console.error(`[Discord] Failed to download document ${docAttachment.filename} for ${label}: ${err instanceof Error ? err.message : err}`);
         }
       }
     }
@@ -455,6 +490,17 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
       promptParts.push(
         "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
       );
+    }
+    if (documentPaths.length > 0) {
+      for (const doc of documentPaths) {
+        promptParts.push(`\nAttached file "${doc.filename}" (saved to ${doc.path}):`);
+        promptParts.push("```");
+        promptParts.push(doc.content);
+        promptParts.push("```");
+      }
+      promptParts.push("The user attached text/document file(s). Read and use the content above in your response.");
+    } else if (hasDocument) {
+      promptParts.push("The user attached document file(s), but downloading them failed. Ask them to resend.");
     }
 
     const prefixedPrompt = promptParts.join("\n");

@@ -11,6 +11,7 @@ import { whatsapp } from "./commands/whatsapp";
 import { matrix } from "./commands/matrix";
 import { send } from "./commands/send";
 import { update } from "./commands/update";
+import { restart } from "./commands/restart";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -43,6 +44,8 @@ if (command === "--stop-all") {
   send(args.slice(1));
 } else if (command === "update") {
   update(args.slice(1));
+} else if (command === "restart") {
+  restart(args.slice(1));
 } else {
   start();
 }
