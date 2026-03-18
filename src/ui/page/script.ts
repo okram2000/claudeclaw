@@ -360,7 +360,7 @@ export const pageScript = String.raw`    const $ = (id) => document.getElementBy
           '<div class="quick-job-item">' +
             '<div class="quick-job-item-main">' +
               '<button class="quick-job-line" type="button" data-toggle-job="' + escAttr(j.name || "") + '">' +
-                '<span class="quick-job-item-name">' + esc(j.name || "job") + "</span>" +
+                '<span class="quick-job-item-name">' + esc(j.name || "job") + (j.parallel ? ' <span class="quick-job-badge-parallel" title="Runs in parallel">∥</span>' : "") + "</span>" +
                 '<span class="quick-job-item-time">' + esc(time || "--") + "</span>" +
                 '<span class="quick-job-item-cooldown">' + esc(cooldown) + "</span>" +
               "</button>" +

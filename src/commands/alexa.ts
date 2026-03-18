@@ -2,7 +2,7 @@ import { createVerify } from "crypto";
 import * as Alexa from "ask-sdk-core";
 import type { HandlerInput, RequestHandler } from "ask-sdk-core";
 import type { RequestEnvelope } from "ask-sdk-model";
-import { ensureProjectClaudeMd, runUserMessage } from "../runner";
+import { ensureProjectClaudeMd, runInteractive } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resolveSkillPrompt } from "../skills";
 
@@ -264,7 +264,7 @@ const AskClawIntentHandler: RequestHandler = {
         promptParts.push(`Message: ${query}`);
       }
 
-      const result = await runUserMessage("alexa", promptParts.join("\n"));
+      const result = await runInteractive("alexa", promptParts.join("\n"));
       clearInterval(progressInterval);
 
       if (result.exitCode !== 0) {

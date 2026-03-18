@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage, runUserMessageStreaming } from "../runner";
+import { ensureProjectClaudeMd, run, runInteractive, runInteractiveStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -639,7 +639,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       }
 
       if (placeholderMsgId === null) {
-        result = await runUserMessage("telegram", prefixedPrompt);
+        result = await runInteractive("telegram", prefixedPrompt);
       } else {
         clearInterval(typingInterval);
 
@@ -677,7 +677,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
           }
         };
 
-        result = await runUserMessageStreaming("telegram", prefixedPrompt, onText);
+        result = await runInteractiveStreaming("telegram", prefixedPrompt, onText);
 
         if (editTimer) { clearTimeout(editTimer); editTimer = null; }
 
@@ -713,7 +713,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         return;
       }
     } else {
-      result = await runUserMessage("telegram", prefixedPrompt);
+      result = await runInteractive("telegram", prefixedPrompt);
     }
 
     if (result.exitCode !== 0) {

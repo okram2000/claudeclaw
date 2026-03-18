@@ -5,6 +5,7 @@ import { buildState, buildTechnicalInfo, sanitizeSettings } from "./services/sta
 import { readHeartbeatSettings, updateHeartbeatSettings } from "./services/settings";
 import { createQuickJob, deleteJob } from "./services/jobs";
 import { readLogs } from "./services/logs";
+import { createSSEStream, getRecentActivity, clientCount } from "../sse";
 
 export function startWebUi(opts: StartWebUiOptions): WebServerHandle {
   const server = Bun.serve({
@@ -139,6 +140,7 @@ export function startWebUi(opts: StartWebUiOptions): WebServerHandle {
           name: j.name,
           schedule: j.schedule,
           promptPreview: j.prompt.slice(0, 160),
+          parallel: j.parallel,
         }));
         return json({ jobs });
       }
@@ -146,6 +148,17 @@ export function startWebUi(opts: StartWebUiOptions): WebServerHandle {
       if (url.pathname === "/api/logs") {
         const tail = clampInt(url.searchParams.get("tail"), 200, 20, 2000);
         return json(await readLogs(tail));
+      }
+
+      // SSE activity feed stream
+      if (url.pathname === "/api/events") {
+        return createSSEStream();
+      }
+
+      // Recent activity JSON snapshot
+      if (url.pathname === "/api/activity") {
+        const limit = clampInt(url.searchParams.get("limit"), 50, 1, 200);
+        return json({ events: getRecentActivity(limit), clients: clientCount() });
       }
 
       return new Response("Not found", { status: 404 });

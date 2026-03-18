@@ -31,6 +31,7 @@ alexa: { enabled: false, port: 3456, skillId: "", allowedUserIds: [], skipVerifi
 whatsapp: { allowedNumbers: [], groupsEnabled: false },
   matrix: { homeserverUrl: "", accessToken: "", userId: "", allowedUserIds: [], listenRooms: [] },
   security: { level: "moderate", allowedTools: [], disallowedTools: [] },
+  overflow: { enabled: true, thresholdSeconds: 60 },
   web: { enabled: false, host: "127.0.0.1", port: 4632 },
   stt: { baseUrl: "", model: "" },
 update: {
@@ -47,6 +48,7 @@ update: {
     userDataDir: "",
     defaultViewport: { width: 1280, height: 800 },
   },
+  activityFeed: { discordChannel: "" },
   streaming: { enabled: false, updateInterval: 1000, platforms: ["discord", "telegram", "slack"] },
 homeassistant: { enabled: false, baseUrl: "", token: "", defaultEntities: [] },
 integrations: {
@@ -145,6 +147,8 @@ export interface Settings {
   whatsapp: WhatsAppConfig;
   matrix: MatrixConfig;
   security: SecurityConfig;
+  overflow: OverflowConfig;
+  activityFeed: ActivityFeedConfig;
   web: WebConfig;
   stt: SttConfig;
   update: UpdateConfig;
@@ -205,6 +209,18 @@ export interface BrowserConfig {
   userDataDir: string;
   /** Default viewport size. */
   defaultViewport: BrowserViewport;
+}
+
+export interface ActivityFeedConfig {
+  /** Discord channel ID to forward activity summaries to. Empty = disabled. */
+  discordChannel: string;
+}
+
+export interface OverflowConfig {
+  /** Enable ephemeral overflow sessions when the main queue is busy. Default: true. */
+  enabled: boolean;
+  /** Seconds the main queue must be busy before interactive messages overflow. Default: 60. */
+  thresholdSeconds: number;
 }
 
 export interface StreamingConfig {
@@ -357,6 +373,17 @@ function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Set
       disallowedTools: Array.isArray(raw.security?.disallowedTools)
         ? raw.security.disallowedTools
         : [],
+    },
+    overflow: {
+      enabled: raw.overflow?.enabled ?? true,
+      thresholdSeconds: Number.isFinite(raw.overflow?.thresholdSeconds)
+        ? Math.max(10, Math.round(Number(raw.overflow.thresholdSeconds)))
+        : 60,
+    },
+    activityFeed: {
+      discordChannel: typeof raw.activityFeed?.discordChannel === "string"
+        ? raw.activityFeed.discordChannel.trim()
+        : "",
     },
     web: {
       enabled: raw.web?.enabled ?? false,

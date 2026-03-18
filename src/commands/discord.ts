@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage, runUserMessageStreaming } from "../runner";
+import { ensureProjectClaudeMd, run, runInteractive, runInteractiveStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -516,7 +516,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
 
       if (!placeholder) {
         // Placeholder send failed — fall back to non-streaming
-        result = await runUserMessage("discord", prefixedPrompt);
+        result = await runInteractive("discord", prefixedPrompt);
       } else {
         clearInterval(typingInterval); // no need for typing while we have the placeholder
 
@@ -550,7 +550,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
           }
         };
 
-        result = await runUserMessageStreaming("discord", prefixedPrompt, onText);
+        result = await runInteractiveStreaming("discord", prefixedPrompt, onText);
 
         if (editTimer) { clearTimeout(editTimer); editTimer = null; }
 
@@ -583,7 +583,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
         return; // done — skip the non-streaming send below
       }
     } else {
-      result = await runUserMessage("discord", prefixedPrompt);
+      result = await runInteractive("discord", prefixedPrompt);
     }
 
     if (result.exitCode !== 0) {

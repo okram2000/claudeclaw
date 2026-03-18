@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, runUserMessage } from "../runner";
+import { ensureProjectClaudeMd, runInteractive } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { transcribeAudioToText } from "../whisper";
 import { resolveSkillPrompt } from "../skills";
@@ -199,7 +199,7 @@ async function handleIncomingMessage(msg: any): Promise<void> {
     }
 
     const prefixedPrompt = promptParts.join("\n");
-    const result = await runUserMessage("whatsapp", prefixedPrompt);
+    const result = await runInteractive("whatsapp", prefixedPrompt);
 
     if (chat) chat.clearState().catch(() => {});
 

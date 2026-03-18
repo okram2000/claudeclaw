@@ -2,8 +2,9 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
 import { getSession, createSession } from "./sessions";
-import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
+import { getSettings, type ModelConfig, type SecurityConfig, type OverflowConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
+import { emit as sseEmit } from "./sse";
 
 const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
 // Resolve prompts relative to the claudeclaw installation, not the project dir
@@ -24,13 +25,38 @@ export interface RunResult {
 
 const RATE_LIMIT_PATTERN = /you.ve hit your limit|out of extra usage/i;
 
-// Serial queue — prevents concurrent --resume on the same session
+// --- Queue with overflow support ---
+// The main queue serializes access to the persistent session (--resume).
+// When the queue has been busy longer than the overflow threshold,
+// interactive messages bypass it and run on ephemeral (no-resume) sessions.
+
 let queue: Promise<unknown> = Promise.resolve();
+let queueBusySince: number | null = null; // timestamp when current task started
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const task = queue.then(fn, fn);
+  const wrapped = async () => {
+    queueBusySince = Date.now();
+    try {
+      return await fn();
+    } finally {
+      queueBusySince = null;
+    }
+  };
+  const task = queue.then(wrapped, wrapped);
   queue = task.catch(() => {});
   return task;
+}
+
+/** How long (ms) the main queue has been busy, or 0 if idle. */
+function queueBusyMs(): number {
+  return queueBusySince ? Date.now() - queueBusySince : 0;
+}
+
+/** Whether the main queue is busy beyond the overflow threshold. */
+function shouldOverflow(overflow: OverflowConfig): boolean {
+  if (!overflow.enabled) return false;
+  const busyMs = queueBusyMs();
+  return busyMs > overflow.thresholdSeconds * 1000;
 }
 
 function extractRateLimitMessage(stdout: string, stderr: string): string | null {
@@ -346,6 +372,197 @@ export async function run(name: string, prompt: string): Promise<RunResult> {
   return enqueue(() => execClaude(name, prompt));
 }
 
+// --- Parallel sessions ---
+// Independent Claude sessions that run outside the serialized queue.
+// Each gets its own session ID and doesn't block the main queue.
+
+interface ParallelSession {
+  id: string;
+  name: string;
+  startedAt: number;
+  proc: ReturnType<typeof Bun.spawn> | null;
+  promise: Promise<RunResult>;
+}
+
+const activeSessions = new Map<string, ParallelSession>();
+
+function generateSessionId(): string {
+  return `par-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export async function runParallel(name: string, prompt: string): Promise<RunResult> {
+  const sessionId = generateSessionId();
+
+  const promise = execClaudeParallel(sessionId, name, prompt);
+  const session: ParallelSession = {
+    id: sessionId,
+    name,
+    startedAt: Date.now(),
+    proc: null,
+    promise,
+  };
+  activeSessions.set(sessionId, session);
+
+  try {
+    const result = await promise;
+    return result;
+  } finally {
+    activeSessions.delete(sessionId);
+  }
+}
+
+export function listActiveSessions(): Array<{ id: string; name: string; startedAt: number; runningMs: number }> {
+  const now = Date.now();
+  return Array.from(activeSessions.values()).map((s) => ({
+    id: s.id,
+    name: s.name,
+    startedAt: s.startedAt,
+    runningMs: now - s.startedAt,
+  }));
+}
+
+export function killSession(id: string): boolean {
+  const session = activeSessions.get(id);
+  if (!session) return false;
+  if (session.proc) {
+    try { session.proc.kill(); } catch {}
+  }
+  activeSessions.delete(id);
+  return true;
+}
+
+async function execClaudeParallel(sessionId: string, name: string, prompt: string): Promise<RunResult> {
+  await mkdir(LOGS_DIR, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logFile = join(LOGS_DIR, `${name}-parallel-${timestamp}.log`);
+
+  const { security, model, api, fallback } = getSettings();
+  const primaryConfig: ModelConfig = { model, api };
+  const fallbackConfig: ModelConfig = {
+    model: fallback?.model ?? "",
+    api: fallback?.api ?? "",
+  };
+  const securityArgs = buildSecurityArgs(security);
+
+  console.log(
+    `[${new Date().toLocaleTimeString()}] Parallel: ${name} (session ${sessionId}, security: ${security.level})`
+  );
+
+  // Always new session with json output — no --resume (independent session)
+  const args = ["claude", "-p", prompt, "--output-format", "json", ...securityArgs];
+
+  const promptContent = await loadPrompts();
+  const appendParts: string[] = [
+    "You are running inside ClaudeClaw.",
+    "This is a parallel session — you have your own independent context. Focus on the current task.",
+  ];
+  if (promptContent) appendParts.push(promptContent);
+
+  if (existsSync(PROJECT_CLAUDE_MD)) {
+    try {
+      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
+      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
+    } catch (e) {
+      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
+    }
+  }
+
+  if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
+  if (appendParts.length > 0) {
+    args.push("--append-system-prompt", appendParts.join("\n\n"));
+  }
+
+  const { CLAUDECODE: _, ...cleanEnv } = process.env;
+  const baseEnv = { ...cleanEnv } as Record<string, string>;
+
+  let exec = await runClaudeOnceTracked(sessionId, args, primaryConfig.model, primaryConfig.api, baseEnv);
+  const primaryRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
+  let usedFallback = false;
+
+  if (primaryRateLimit && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
+    console.warn(
+      `[${new Date().toLocaleTimeString()}] Claude limit reached (parallel); retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
+    );
+    exec = await runClaudeOnceTracked(sessionId, args, fallbackConfig.model, fallbackConfig.api, baseEnv);
+    usedFallback = true;
+  }
+
+  let stdout = exec.rawStdout;
+  const stderr = exec.stderr;
+  const exitCode = exec.exitCode;
+  const rateLimitMessage = extractRateLimitMessage(stdout, stderr);
+
+  if (rateLimitMessage) {
+    stdout = rateLimitMessage;
+  } else if (exitCode === 0) {
+    try {
+      const json = JSON.parse(exec.rawStdout);
+      stdout = json.result ?? "";
+    } catch {
+      // leave stdout as raw
+    }
+  }
+
+  const result: RunResult = { stdout, stderr, exitCode };
+
+  const output = [
+    `# ${name}`,
+    `Date: ${new Date().toISOString()}`,
+    `Session: ${sessionId} (parallel)`,
+    `Model config: ${usedFallback ? "fallback" : "primary"}`,
+    `Prompt: ${prompt}`,
+    `Exit code: ${result.exitCode}`,
+    "",
+    "## Output",
+    stdout,
+    ...(stderr ? ["## Stderr", stderr] : []),
+  ].join("\n");
+
+  await Bun.write(logFile, output);
+  console.log(`[${new Date().toLocaleTimeString()}] Done (parallel): ${name} → ${logFile}`);
+
+  return result;
+}
+
+/** Like runClaudeOnce but tracks the spawned process in activeSessions for killability. */
+async function runClaudeOnceTracked(
+  sessionId: string,
+  baseArgs: string[],
+  model: string,
+  api: string,
+  baseEnv: Record<string, string>
+): Promise<{ rawStdout: string; stderr: string; exitCode: number }> {
+  const args = [...baseArgs];
+  const normalizedModel = model.trim().toLowerCase();
+  if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
+
+  const proc = Bun.spawn(args, {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: buildChildEnv(baseEnv, model, api),
+  });
+
+  // Track the process so killSession() can terminate it
+  const session = activeSessions.get(sessionId);
+  if (session) session.proc = proc;
+
+  const [rawStdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  await proc.exited;
+
+  // Clear proc reference after completion
+  if (session) session.proc = null;
+
+  return {
+    rawStdout,
+    stderr,
+    exitCode: proc.exitCode ?? 1,
+  };
+}
+
 function prefixUserMessageWithClock(prompt: string): string {
   try {
     const settings = getSettings();
@@ -359,6 +576,283 @@ function prefixUserMessageWithClock(prompt: string): string {
 
 export async function runUserMessage(name: string, prompt: string): Promise<RunResult> {
   return run(name, prefixUserMessageWithClock(prompt));
+}
+
+// --- Ephemeral overflow sessions ---
+// These run without --resume, creating a throwaway session.
+// Used when the main queue is busy and an interactive message needs immediate attention.
+
+async function execClaudeEphemeral(name: string, prompt: string): Promise<RunResult> {
+  await mkdir(LOGS_DIR, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logFile = join(LOGS_DIR, `${name}-ephemeral-${timestamp}.log`);
+
+  const { security, model, api, fallback } = getSettings();
+  const primaryConfig: ModelConfig = { model, api };
+  const fallbackConfig: ModelConfig = {
+    model: fallback?.model ?? "",
+    api: fallback?.api ?? "",
+  };
+  const securityArgs = buildSecurityArgs(security);
+
+  console.log(
+    `[${new Date().toLocaleTimeString()}] Overflow: ${name} (ephemeral session, security: ${security.level})`
+  );
+
+  // Always new session with json output — no --resume
+  const args = ["claude", "-p", prompt, "--output-format", "json", ...securityArgs];
+
+  const promptContent = await loadPrompts();
+  const appendParts: string[] = [
+    "You are running inside ClaudeClaw.",
+    "This is an ephemeral overflow session — you do NOT have conversation history from prior messages. Focus on the current request.",
+  ];
+  if (promptContent) appendParts.push(promptContent);
+
+  if (existsSync(PROJECT_CLAUDE_MD)) {
+    try {
+      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
+      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
+    } catch (e) {
+      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
+    }
+  }
+
+  if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
+  if (appendParts.length > 0) {
+    args.push("--append-system-prompt", appendParts.join("\n\n"));
+  }
+
+  const { CLAUDECODE: _, ...cleanEnv } = process.env;
+  const baseEnv = { ...cleanEnv } as Record<string, string>;
+
+  let exec = await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv);
+  const primaryRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
+  let usedFallback = false;
+
+  if (primaryRateLimit && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
+    console.warn(
+      `[${new Date().toLocaleTimeString()}] Claude limit reached (overflow); retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
+    );
+    exec = await runClaudeOnce(args, fallbackConfig.model, fallbackConfig.api, baseEnv);
+    usedFallback = true;
+  }
+
+  let stdout = exec.rawStdout;
+  const stderr = exec.stderr;
+  const exitCode = exec.exitCode;
+  const rateLimitMessage = extractRateLimitMessage(stdout, stderr);
+
+  if (rateLimitMessage) {
+    stdout = rateLimitMessage;
+  } else if (exitCode === 0) {
+    // Parse JSON output — but do NOT save the session ID (ephemeral)
+    try {
+      const json = JSON.parse(exec.rawStdout);
+      stdout = json.result ?? "";
+    } catch {
+      // leave stdout as raw
+    }
+  }
+
+  const result: RunResult = { stdout, stderr, exitCode };
+
+  const output = [
+    `# ${name}`,
+    `Date: ${new Date().toISOString()}`,
+    `Session: ephemeral (overflow)`,
+    `Model config: ${usedFallback ? "fallback" : "primary"}`,
+    `Prompt: ${prompt}`,
+    `Exit code: ${result.exitCode}`,
+    "",
+    "## Output",
+    stdout,
+    ...(stderr ? ["## Stderr", stderr] : []),
+  ].join("\n");
+
+  await Bun.write(logFile, output);
+  console.log(`[${new Date().toLocaleTimeString()}] Done (overflow): ${name} → ${logFile}`);
+
+  return result;
+}
+
+async function execClaudeEphemeralStreaming(
+  name: string,
+  prompt: string,
+  onText: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  await mkdir(LOGS_DIR, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logFile = join(LOGS_DIR, `${name}-ephemeral-${timestamp}.log`);
+
+  const { security, model, api, fallback } = getSettings();
+  const primaryConfig: ModelConfig = { model, api };
+  const fallbackConfig: ModelConfig = {
+    model: fallback?.model ?? "",
+    api: fallback?.api ?? "",
+  };
+  const securityArgs = buildSecurityArgs(security);
+
+  console.log(
+    `[${new Date().toLocaleTimeString()}] Overflow streaming: ${name} (ephemeral, security: ${security.level})`
+  );
+
+  // No --resume, always stream-json
+  const args = ["claude", "-p", prompt, "--output-format", "stream-json", ...securityArgs];
+
+  const promptContent = await loadPrompts();
+  const appendParts: string[] = [
+    "You are running inside ClaudeClaw.",
+    "This is an ephemeral overflow session — you do NOT have conversation history from prior messages. Focus on the current request.",
+  ];
+  if (promptContent) appendParts.push(promptContent);
+  if (existsSync(PROJECT_CLAUDE_MD)) {
+    try {
+      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
+      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
+    } catch (e) {
+      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
+    }
+  }
+  if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
+  if (appendParts.length > 0) args.push("--append-system-prompt", appendParts.join("\n\n"));
+
+  const { CLAUDECODE: _, ...cleanEnv } = process.env;
+  const baseEnv = { ...cleanEnv } as Record<string, string>;
+  const childEnv = buildChildEnv(baseEnv, primaryConfig.model, primaryConfig.api);
+  const normalizedModel = primaryConfig.model.trim().toLowerCase();
+  const fullArgs = [...args];
+  if (primaryConfig.model.trim() && normalizedModel !== "glm") {
+    fullArgs.push("--model", primaryConfig.model.trim());
+  }
+
+  const proc = Bun.spawn(fullArgs, { stdout: "pipe", stderr: "pipe", env: childEnv });
+  const stderrPromise = new Response(proc.stderr).text();
+
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let lineBuffer = "";
+  let finalResultText = "";
+  let resultIsError = false;
+
+  try {
+    while (true) {
+      if (signal?.aborted) { proc.kill(); break; }
+      const { done, value } = await reader.read();
+      if (done) break;
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed);
+          if (event.type === "assistant" && event.message?.content) {
+            const text = extractAssistantText(event.message.content);
+            if (text) onText(text);
+          } else if (event.type === "result") {
+            finalResultText = String(event.result ?? "");
+            resultIsError = event.is_error ?? false;
+          }
+        } catch {}
+      }
+    }
+    if (lineBuffer.trim()) {
+      try {
+        const event = JSON.parse(lineBuffer.trim());
+        if (event.type === "result") {
+          finalResultText = String(event.result ?? "");
+          resultIsError = event.is_error ?? false;
+        }
+      } catch {}
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  await proc.exited;
+  const stderr = await stderrPromise;
+  const exitCode = proc.exitCode ?? 1;
+
+  let stdout = finalResultText;
+  const rateLimitMessage = extractRateLimitMessage(stdout, stderr);
+  let usedFallback = false;
+
+  if (rateLimitMessage && hasModelConfig(fallbackConfig) && !sameModelConfig(primaryConfig, fallbackConfig)) {
+    console.warn(`[${new Date().toLocaleTimeString()}] Claude limit reached (overflow streaming); retrying with fallback...`);
+    const fbArgs = [...args];
+    if (fallbackConfig.model.trim() && fallbackConfig.model.trim().toLowerCase() !== "glm") {
+      fbArgs.push("--model", fallbackConfig.model.trim());
+    }
+    const fbExec = await runClaudeOnce(fbArgs, fallbackConfig.model, fallbackConfig.api, baseEnv);
+    const parsed = parseStreamJsonOutput(fbExec.rawStdout);
+    stdout = parsed.text || extractRateLimitMessage(fbExec.rawStdout, fbExec.stderr) || fbExec.rawStdout;
+    usedFallback = true;
+    if (stdout) onText(stdout);
+  }
+
+  const result: RunResult = { stdout, stderr, exitCode };
+
+  const output = [
+    `# ${name}`,
+    `Date: ${new Date().toISOString()}`,
+    `Session: ephemeral (overflow) [streaming]`,
+    `Model config: ${usedFallback ? "fallback" : "primary"}`,
+    `Prompt: ${prompt}`,
+    `Exit code: ${result.exitCode}`,
+    "",
+    "## Output",
+    stdout,
+    ...(stderr ? ["## Stderr", stderr] : []),
+  ].join("\n");
+
+  await Bun.write(logFile, output);
+  console.log(`[${new Date().toLocaleTimeString()}] Done (overflow streaming): ${name} → ${logFile}`);
+
+  return result;
+}
+
+// --- Interactive run functions (overflow-aware) ---
+// These check if the main queue is busy. If it's been busy longer than
+// the configured threshold, they bypass the queue and run ephemerally.
+
+export async function runInteractive(name: string, prompt: string): Promise<RunResult> {
+  sseEmit("message_received", `Message from ${name}`, { source: name, preview: prompt.slice(0, 120) });
+  const { overflow } = getSettings();
+  let result: RunResult;
+  if (shouldOverflow(overflow)) {
+    const busySec = Math.round(queueBusyMs() / 1000);
+    console.log(`[${new Date().toLocaleTimeString()}] Main queue busy for ${busySec}s > ${overflow.thresholdSeconds}s threshold — using ephemeral overflow`);
+    result = await execClaudeEphemeral(name, prefixUserMessageWithClock(prompt));
+  } else {
+    result = await enqueue(() => execClaude(name, prefixUserMessageWithClock(prompt)));
+  }
+  sseEmit("message_response", `Response to ${name}`, { source: name, exitCode: result.exitCode, preview: result.stdout.slice(0, 200) });
+  return result;
+}
+
+export async function runInteractiveStreaming(
+  name: string,
+  prompt: string,
+  onText: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  sseEmit("message_received", `Message from ${name}`, { source: name, preview: prompt.slice(0, 120) });
+  const { overflow } = getSettings();
+  let result: RunResult;
+  if (shouldOverflow(overflow)) {
+    const busySec = Math.round(queueBusyMs() / 1000);
+    console.log(`[${new Date().toLocaleTimeString()}] Main queue busy for ${busySec}s > ${overflow.thresholdSeconds}s threshold — using ephemeral overflow (streaming)`);
+    result = await execClaudeEphemeralStreaming(name, prefixUserMessageWithClock(prompt), onText, signal);
+  } else {
+    result = await enqueue(() => execClaudeStreaming(name, prefixUserMessageWithClock(prompt), onText, signal));
+  }
+  sseEmit("message_response", `Response to ${name}`, { source: name, exitCode: result.exitCode, preview: result.stdout.slice(0, 200) });
+  return result;
 }
 
 // --- Streaming support ---

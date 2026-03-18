@@ -1,7 +1,7 @@
 import { writeFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
 import { fileURLToPath } from "url";
-import { run, runUserMessage, bootstrap, ensureProjectClaudeMd, loadHeartbeatPromptTemplate } from "../runner";
+import { run, runParallel, runInteractive, bootstrap, ensureProjectClaudeMd, loadHeartbeatPromptTemplate } from "../runner";
 import { writeState, type StateData } from "../statusline";
 import { cronMatches, nextCronMatch } from "../cron";
 import { clearJobSchedule, loadJobs } from "../jobs";
@@ -10,6 +10,7 @@ import { initConfig, loadSettings, reloadSettings, resolvePrompt, type Heartbeat
 import { checkForUpdates, applyUpdate, notifyChannels, restartDaemon, getPluginInstallPath, formatChangelog } from "../updater";
 import { getDayAndMinuteAtOffset } from "../timezone";
 import { startWebUi, type WebServerHandle } from "../web";
+import { emit as sseEmit, setDiscordForwarding, forwardToDiscordFeed } from "../sse";
 import type { Job } from "../jobs";
 
 const CLAUDE_DIR = join(process.cwd(), ".claude");
@@ -317,7 +318,7 @@ console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram
     await initConfig();
     await loadSettings();
     await ensureProjectClaudeMd();
-    const result = await runUserMessage("prompt", payload);
+    const result = await runInteractive("prompt", payload);
     console.log(result.stdout);
     if (result.exitCode !== 0) process.exit(result.exitCode);
     return;
@@ -384,6 +385,7 @@ if (whatsappStopApp) whatsappStopApp();
   process.on("SIGINT", shutdown);
 
   console.log("ClaudeClaw daemon started");
+  sseEmit("daemon_start", "Daemon started", { pid: process.pid });
   console.log(`  PID: ${process.pid}`);
   console.log(`  Security: ${settings.security.level}`);
   if (settings.security.allowedTools.length > 0)
@@ -394,7 +396,7 @@ if (whatsappStopApp) whatsappStopApp();
   console.log(`  Web UI: ${webEnabled ? `http://${settings.web.host}:${webPort}` : "disabled"}`);
   if (debugFlag) console.log("  Debug: enabled");
   console.log(`  Jobs loaded: ${jobs.length}`);
-  jobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]`));
+  jobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]${j.parallel ? " (parallel)" : ""}`));
 
   // --- Mutable state ---
   let currentSettings: Settings = settings;
@@ -448,6 +450,18 @@ if (whatsappStopApp) whatsappStopApp();
 
   await initDiscord(currentSettings.discord.token);
   if (!discordToken) console.log("  Discord: not configured");
+
+  // --- Activity feed Discord forwarding ---
+  async function updateActivityFeedForwarding() {
+    const channelId = currentSettings.activityFeed?.discordChannel;
+    if (channelId && discordToken) {
+      const { sendMessage: discordSendMsg } = await import("./discord");
+      setDiscordForwarding(channelId, (chId, text) => discordSendMsg(discordToken, chId, text));
+    } else {
+      setDiscordForwarding(null, null);
+    }
+  }
+  await updateActivityFeedForwarding();
 
   // --- Slack ---
   let slackSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
@@ -832,6 +846,8 @@ if (whatsappStopApp) whatsappStopApp();
         );
         return;
       }
+      sseEmit("heartbeat_start", "Heartbeat running");
+      forwardToDiscordFeed("\u{1F493} Heartbeat started");
       Promise.all([
         resolvePrompt(currentSettings.heartbeat.prompt),
         loadHeartbeatPromptTemplate(),
@@ -848,7 +864,13 @@ if (whatsappStopApp) whatsappStopApp();
         })
         .then((r) => {
           if (!r) return;
-          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !r.stdout.trim().startsWith("HEARTBEAT_OK");
+          const isOk = r.stdout.trim().startsWith("HEARTBEAT_OK");
+          sseEmit("heartbeat_result", isOk ? "Heartbeat OK" : "Heartbeat has output", {
+            exitCode: r.exitCode,
+            preview: r.stdout.slice(0, 200),
+          });
+          if (!isOk) forwardToDiscordFeed(`\u{1F493} Heartbeat: ${r.stdout.slice(0, 120)}`);
+          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !isOk;
           if (shouldForward) {
             forwardToTelegram("", r);
             forwardToDiscord("", r);
@@ -942,7 +964,7 @@ if (whatsappStopApp) whatsappStopApp();
       const oldJobNames = currentJobs.map((j) => `${j.name}:${j.schedule}:${j.prompt}`).sort().join("|");
       if (jobNames !== oldJobNames) {
         console.log(`[${ts()}] Jobs reloaded: ${newJobs.length} job(s)`);
-        newJobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]`));
+        newJobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]${j.parallel ? " (parallel)" : ""}`));
       }
       currentJobs = newJobs;
 
@@ -951,6 +973,9 @@ if (whatsappStopApp) whatsappStopApp();
 
       // Discord changes
       await initDiscord(newSettings.discord.token);
+
+      // Activity feed forwarding
+      await updateActivityFeedForwarding();
 
       // Slack changes
       await initSlack(newSettings.slack.token, newSettings.slack.appToken);
@@ -1001,9 +1026,17 @@ whatsapp: whatsappConfigured,
     const now = new Date();
     for (const job of currentJobs) {
       if (cronMatches(job.schedule, now, currentSettings.timezoneOffsetMinutes)) {
+        sseEmit("job_start", `Job started: ${job.name}${job.parallel ? " (parallel)" : ""}`, { job: job.name, parallel: job.parallel });
+        forwardToDiscordFeed(`\u{1F4CB} Job started: ${job.name}${job.parallel ? " (parallel)" : ""}`);
         resolvePrompt(job.prompt)
-          .then((prompt) => run(job.name, prompt))
+          .then((prompt) => job.parallel ? runParallel(job.name, prompt) : run(job.name, prompt))
           .then((r) => {
+            sseEmit("job_result", `Job finished: ${job.name}`, {
+              job: job.name,
+              exitCode: r.exitCode,
+              preview: r.stdout.slice(0, 200),
+            });
+            forwardToDiscordFeed(`\u{2705} Job done: ${job.name} (exit ${r.exitCode})`);
             if (job.notify === false) return;
             if (job.notify === "error" && r.exitCode === 0) return;
             forwardToTelegram(job.name, r);

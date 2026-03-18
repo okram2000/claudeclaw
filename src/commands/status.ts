@@ -108,7 +108,9 @@ async function showStatus(): Promise<boolean> {
         const content = await Bun.file(join(JOBS_DIR, f)).text();
         const match = content.match(/schedule:\s*["']?([^"'\n]+)/);
         const schedule = match ? match[1].trim() : "unknown";
-        console.log(`    - ${f.replace(/\.md$/, "")} [${schedule}]`);
+        const parallelMatch = content.match(/parallel:\s*["']?(true|yes|1)/i);
+        const parallelTag = parallelMatch ? " (parallel)" : "";
+        console.log(`    - ${f.replace(/\.md$/, "")} [${schedule}]${parallelTag}`);
       }
     }
   } catch {}

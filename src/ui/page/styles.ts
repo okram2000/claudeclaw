@@ -500,6 +500,17 @@ export const pageStyles = String.raw`    :root {
       white-space: nowrap;
       text-align: left;
     }
+    .quick-job-badge-parallel {
+      display: inline-block;
+      font-size: 0.7em;
+      background: rgba(110, 180, 255, 0.25);
+      color: #8ec8ff;
+      border-radius: 3px;
+      padding: 0 4px;
+      margin-left: 4px;
+      vertical-align: middle;
+      letter-spacing: 1px;
+    }
     .quick-job-item-cooldown {
       color: #a8f1ca;
       white-space: nowrap;

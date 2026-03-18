@@ -1,4 +1,4 @@
-import { runUserMessage } from "../runner";
+import { runInteractive } from "../runner";
 import { getSession } from "../sessions";
 import { loadSettings, initConfig } from "../config";
 
@@ -21,7 +21,7 @@ export async function send(args: string[]) {
     process.exit(1);
   }
 
-  const result = await runUserMessage("send", message);
+  const result = await runInteractive("send", message);
   console.log(result.stdout);
 
   if (telegramFlag) {

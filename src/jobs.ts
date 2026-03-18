@@ -9,6 +9,7 @@ export interface Job {
   prompt: string;
   recurring: boolean;
   notify: true | false | "error";
+  parallel: boolean;
 }
 
 function parseFrontmatterValue(raw: string): string {
@@ -51,7 +52,13 @@ function parseJobFile(name: string, content: string): Job | null {
     : notifyRaw === "error" ? "error"
     : true;
 
-  return { name, schedule, prompt, recurring, notify };
+  const parallelLine = lines.find((l) => l.startsWith("parallel:"));
+  const parallelRaw = parallelLine
+    ? parseFrontmatterValue(parallelLine.replace("parallel:", "")).toLowerCase()
+    : "";
+  const parallel = parallelRaw === "true" || parallelRaw === "yes" || parallelRaw === "1";
+
+  return { name, schedule, prompt, recurring, notify, parallel };
 }
 
 export async function loadJobs(): Promise<Job[]> {

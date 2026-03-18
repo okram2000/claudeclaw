@@ -1,5 +1,5 @@
 import { App as BoltApp, LogLevel } from "@slack/bolt";
-import { ensureProjectClaudeMd, runUserMessage, runUserMessageStreaming } from "../runner";
+import { ensureProjectClaudeMd, runInteractive, runInteractiveStreaming } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession } from "../sessions";
 import { transcribeAudioToText } from "../whisper";
@@ -279,7 +279,7 @@ async function handleIncomingMessage(params: {
       }
 
       if (!placeholderTs || !app) {
-        result = await runUserMessage("slack", prefixedPrompt);
+        result = await runInteractive("slack", prefixedPrompt);
       } else {
         const intervalMs = Math.max(1000, streamingConfig.updateInterval);
         let lastEditAt = Date.now();
@@ -315,7 +315,7 @@ async function handleIncomingMessage(params: {
           }
         };
 
-        result = await runUserMessageStreaming("slack", prefixedPrompt, onText);
+        result = await runInteractiveStreaming("slack", prefixedPrompt, onText);
 
         if (editTimer) { clearTimeout(editTimer); editTimer = null; }
 
@@ -350,7 +350,7 @@ async function handleIncomingMessage(params: {
         return;
       }
     } else {
-      result = await runUserMessage("slack", prefixedPrompt);
+      result = await runInteractive("slack", prefixedPrompt);
     }
 
     await removeReaction(channelId, messageTs, "eyes");
