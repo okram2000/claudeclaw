@@ -259,7 +259,13 @@ function isVoiceAttachment(a: DiscordAttachment): boolean {
   return Boolean(a.content_type?.startsWith("audio/"));
 }
 
+function isPdfAttachment(a: DiscordAttachment): boolean {
+  if (a.content_type?.startsWith("application/pdf")) return true;
+  return extname(a.filename).toLowerCase() === ".pdf";
+}
+
 function isDocumentAttachment(a: DiscordAttachment): boolean {
+  if (isPdfAttachment(a)) return true;
   const textTypes = ["text/", "application/json", "application/xml", "application/javascript",
     "application/typescript", "application/x-yaml", "application/yaml", "application/toml"];
   if (a.content_type && textTypes.some(t => a.content_type!.startsWith(t))) return true;
@@ -438,14 +444,20 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
         try {
           const docPath = await downloadDiscordAttachment(docAttachment, "document");
           if (docPath) {
-            const file = Bun.file(docPath);
-            const text = await file.text();
-            // Limit content to 50k chars to avoid prompt overflow
-            const truncated = text.length > 50000
-              ? text.slice(0, 50000) + `\n... [truncated, ${text.length} total chars]`
-              : text;
-            documentPaths.push({ path: docPath, filename: docAttachment.filename, content: truncated });
-            debugLog(`Document downloaded and read: ${docAttachment.filename} (${text.length} chars)`);
+            if (isPdfAttachment(docAttachment)) {
+              // PDFs are binary — don't read as text, let Claude read them natively via Read tool
+              documentPaths.push({ path: docPath, filename: docAttachment.filename, content: `[PDF file saved to ${docPath} — use the Read tool to view it]` });
+              debugLog(`PDF downloaded: ${docAttachment.filename} -> ${docPath}`);
+            } else {
+              const file = Bun.file(docPath);
+              const text = await file.text();
+              // Limit content to 50k chars to avoid prompt overflow
+              const truncated = text.length > 50000
+                ? text.slice(0, 50000) + `\n... [truncated, ${text.length} total chars]`
+                : text;
+              documentPaths.push({ path: docPath, filename: docAttachment.filename, content: truncated });
+              debugLog(`Document downloaded and read: ${docAttachment.filename} (${text.length} chars)`);
+            }
           }
         } catch (err) {
           console.error(`[Discord] Failed to download document ${docAttachment.filename} for ${label}: ${err instanceof Error ? err.message : err}`);
@@ -492,13 +504,23 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
       );
     }
     if (documentPaths.length > 0) {
-      for (const doc of documentPaths) {
+      const pdfDocs = documentPaths.filter(d => d.filename.toLowerCase().endsWith(".pdf"));
+      const textDocs = documentPaths.filter(d => !d.filename.toLowerCase().endsWith(".pdf"));
+      for (const doc of textDocs) {
         promptParts.push(`\nAttached file "${doc.filename}" (saved to ${doc.path}):`);
         promptParts.push("```");
         promptParts.push(doc.content);
         promptParts.push("```");
       }
-      promptParts.push("The user attached text/document file(s). Read and use the content above in your response.");
+      for (const doc of pdfDocs) {
+        promptParts.push(`\nAttached PDF "${doc.filename}" saved to: ${doc.path}`);
+      }
+      if (pdfDocs.length > 0) {
+        promptParts.push("The user attached PDF file(s). Use the Read tool to read the PDF file(s) at the path(s) above, then use the content in your response.");
+      }
+      if (textDocs.length > 0) {
+        promptParts.push("The user attached text/document file(s). Read and use the content above in your response.");
+      }
     } else if (hasDocument) {
       promptParts.push("The user attached document file(s), but downloading them failed. Ask them to resend.");
     }
