@@ -1,5 +1,5 @@
 ---
-description: Start a remote development session on a server (e.g. apoc) in a detached screen session with Claude Code running autonomously. Use when asked to start a dev session, kick off work on apoc, run a task on a remote server, launch a coding session, or delegate work to a remote Claude. Trigger phrases include "dev session", "start session on apoc", "remote session", "kick off on apoc", "launch dev session", "start working on apoc", "development session", "remote dev", "delegate to apoc", "/dev-session".
+description: Start a remote development session on a server in a detached screen session with Claude Code running autonomously. Use when asked to start a dev session, run a task on a remote server, launch a coding session, or delegate work to a remote Claude. Trigger phrases include "dev session", "remote session", "launch dev session", "development session", "remote dev", "delegate to server", "/dev-session".
 user_invocable: true
 ---
 
@@ -18,8 +18,8 @@ Start an autonomous Claude Code session on a remote server inside a `screen` ses
 ```
 
 **Defaults:**
-- `host`: `apoc.sky.home` (if omitted)
-- SSH: `ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none acid@<host>`
+- `host`: `your-server.local` (if omitted)
+- SSH: `ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none user@<host>`
 
 ## Instructions
 
@@ -29,7 +29,7 @@ Start an autonomous Claude Code session on a remote server inside a `screen` ses
 2. SSH into the host and start a detached screen session with Claude Code:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none acid@<host> "screen -dmS <session-name> bash -c 'cd <project-dir> && claude -p \"<task-description>\" --dangerously-skip-permissions --output-format text 2>&1 | tee /tmp/devsession-<session-name>.log; echo \"SESSION_COMPLETE\" >> /tmp/devsession-<session-name>.log'"
+ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none user@<host> "screen -dmS <session-name> bash -c 'cd <project-dir> && claude -p \"<task-description>\" --dangerously-skip-permissions --output-format text 2>&1 | tee /tmp/devsession-<session-name>.log; echo \"SESSION_COMPLETE\" >> /tmp/devsession-<session-name>.log'"
 ```
 
 3. Confirm to the user that the session started
@@ -45,7 +45,7 @@ echo '<session-name>|<host>|<project-dir>|<timestamp>' >> /home/acid/claudeclaw/
 SSH into the host and check the screen session + log:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none acid@<host> "screen -ls | grep <session-name> && echo '---RUNNING---' || echo '---FINISHED---'; echo '=== LAST 30 LINES ==='; tail -30 /tmp/devsession-<session-name>.log"
+ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none user@<host> "screen -ls | grep <session-name> && echo '---RUNNING---' || echo '---FINISHED---'; echo '=== LAST 30 LINES ==='; tail -30 /tmp/devsession-<session-name>.log"
 ```
 
 If the log contains `SESSION_COMPLETE`, the session is done. Report the final output to the user.
@@ -61,7 +61,7 @@ Also SSH to each host and check which screens are still active.
 ### Stopping a session: `/dev-session stop <name>`
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none acid@<host> "screen -S <session-name> -X quit"
+ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none user@<host> "screen -S <session-name> -X quit"
 ```
 
 Remove from dev-sessions.txt.
@@ -69,7 +69,7 @@ Remove from dev-sessions.txt.
 ### Reading full log: `/dev-session log <name> [lines]`
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none acid@<host> "tail -<lines> /tmp/devsession-<session-name>.log"
+ssh -i ~/.ssh/id_ed25519 -o IdentityAgent=none user@<host> "tail -<lines> /tmp/devsession-<session-name>.log"
 ```
 
 Default: 50 lines.
@@ -87,5 +87,5 @@ During heartbeats, if there are active dev sessions in `dev-sessions.txt`:
 - The `--dangerously-skip-permissions` flag is required since there's no interactive terminal
 - Log output goes to `/tmp/devsession-<name>.log` for later review
 - Multiple sessions can run in parallel on the same or different hosts
-- If the user just says "start on apoc" without a host, default to `apoc.sky.home`
+- If the user just says "start on server" without a host, default to `your-server.local`
 - Session names should be short, lowercase, hyphenated (e.g. `holowar-e2e`, `trader-optimize`)

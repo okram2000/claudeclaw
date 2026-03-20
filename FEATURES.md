@@ -100,7 +100,7 @@ ClaudeClaw maintains continuity across sessions through multiple memory layers:
 | `runInteractiveStreaming()` | Progressive message updates with streaming |
 
 ### Dev Sessions (Remote)
-- SSH into remote servers (e.g. `apoc.sky.home`)
+- SSH into remote servers
 - Launch Claude Code in detached `screen` sessions
 - `--dangerously-skip-permissions` for fully autonomous operation
 - Progress monitoring via log files

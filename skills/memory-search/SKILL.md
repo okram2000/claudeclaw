@@ -46,7 +46,7 @@ If no results are found, say so clearly.
 
 ```
 /memory-search trading strategy
-/memory-search Lilly milestones
+/memory-search project milestones
 /memory-search heartbeat errors
 /memory-search comfyui workflow
 ```
