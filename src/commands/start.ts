@@ -1,0 +1,1061 @@
+import { writeFile, unlink, mkdir } from "fs/promises";
+import { join } from "path";
+import { fileURLToPath } from "url";
+import { run, runParallel, runInteractive, bootstrap, ensureProjectClaudeMd, loadHeartbeatPromptTemplate } from "../runner";
+import { writeState, type StateData } from "../statusline";
+import { cronMatches, nextCronMatch } from "../cron";
+import { clearJobSchedule, loadJobs } from "../jobs";
+import { writePidFile, cleanupPidFile, checkExistingDaemon } from "../pid";
+import { initConfig, loadSettings, reloadSettings, resolvePrompt, type HeartbeatConfig, type Settings, type UpdateConfig } from "../config";
+import { checkForUpdates, applyUpdate, notifyChannels, restartDaemon, getPluginInstallPath, formatChangelog } from "../updater";
+import { getDayAndMinuteAtOffset } from "../timezone";
+import { startWebUi, type WebServerHandle } from "../web";
+import { emit as sseEmit, setDiscordForwarding, forwardToDiscordFeed } from "../sse";
+import type { Job } from "../jobs";
+
+const CLAUDE_DIR = join(process.cwd(), ".claude");
+const HEARTBEAT_DIR = join(CLAUDE_DIR, "claudeclaw");
+const STATUSLINE_FILE = join(CLAUDE_DIR, "statusline.cjs");
+const CLAUDE_SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
+const PREFLIGHT_SCRIPT = fileURLToPath(new URL("../preflight.ts", import.meta.url));
+
+// --- Statusline setup/teardown ---
+
+const STATUSLINE_SCRIPT = `#!/usr/bin/env node
+const { readFileSync } = require("fs");
+const { join } = require("path");
+
+const DIR = join(__dirname, "claudeclaw");
+const STATE_FILE = join(DIR, "state.json");
+const PID_FILE = join(DIR, "daemon.pid");
+
+const R = "\\x1b[0m";
+const DIM = "\\x1b[2m";
+const RED = "\\x1b[31m";
+const GREEN = "\\x1b[32m";
+
+function fmt(ms) {
+  if (ms <= 0) return GREEN + "now!" + R;
+  var s = Math.floor(ms / 1000);
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m";
+  return (s % 60) + "s";
+}
+
+function alive() {
+  try {
+    var pid = readFileSync(PID_FILE, "utf-8").trim();
+    process.kill(Number(pid), 0);
+    return true;
+  } catch { return false; }
+}
+
+var B = DIM + "\\u2502" + R;
+var TL = DIM + "\\u256d" + R;
+var TR = DIM + "\\u256e" + R;
+var BL = DIM + "\\u2570" + R;
+var BR = DIM + "\\u256f" + R;
+var H = DIM + "\\u2500" + R;
+var HEADER = TL + H.repeat(6) + " \\ud83e\\udd9e ClaudeClaw \\ud83e\\udd9e " + H.repeat(6) + TR;
+var FOOTER = BL + H.repeat(30) + BR;
+
+if (!alive()) {
+  process.stdout.write(
+    HEADER + "\\n" +
+    B + "        " + RED + "\\u25cb offline" + R + "              " + B + "\\n" +
+    FOOTER
+  );
+  process.exit(0);
+}
+
+try {
+  var state = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+  var now = Date.now();
+  var info = [];
+
+  if (state.heartbeat) {
+    info.push("\\ud83d\\udc93 " + fmt(state.heartbeat.nextAt - now));
+  }
+
+  var jc = (state.jobs || []).length;
+  info.push("\\ud83d\\udccb " + jc + " job" + (jc !== 1 ? "s" : ""));
+  info.push(GREEN + "\\u25cf live" + R);
+
+  if (state.telegram) {
+    info.push(GREEN + "\\ud83d\\udce1" + R);
+  }
+
+  if (state.discord) {
+    info.push(GREEN + "\\ud83c\\udfae" + R);
+  }
+
+  if (state.slack) {
+    info.push(GREEN + "\\ud83d\\udcac" + R);
+  }
+
+if (state.alexa) {
+    info.push(GREEN + "\\ud83c\\udf99" + R);
+if (state.whatsapp) {
+    info.push(GREEN + "\\ud83d\\udcf1" + R);
+  }
+
+  if (state.matrix) {
+    info.push(GREEN + "\\ud83d\\udd37" + R);
+  }
+
+  var mid = " " + info.join(" " + B + " ") + " ";
+
+  process.stdout.write(HEADER + "\\n" + B + mid + B + "\\n" + FOOTER);
+} catch {
+  process.stdout.write(
+    HEADER + "\\n" +
+    B + DIM + "         waiting...         " + R + B + "\\n" +
+    FOOTER
+  );
+}
+`;
+
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+
+function parseClockMinutes(value: string): number | null {
+  const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function isHeartbeatExcludedNow(config: HeartbeatConfig, timezoneOffsetMinutes: number): boolean {
+  return isHeartbeatExcludedAt(config, timezoneOffsetMinutes, new Date());
+}
+
+function isHeartbeatExcludedAt(config: HeartbeatConfig, timezoneOffsetMinutes: number, at: Date): boolean {
+  if (!Array.isArray(config.excludeWindows) || config.excludeWindows.length === 0) return false;
+  const local = getDayAndMinuteAtOffset(at, timezoneOffsetMinutes);
+
+  for (const window of config.excludeWindows) {
+    const start = parseClockMinutes(window.start);
+    const end = parseClockMinutes(window.end);
+    if (start == null || end == null) continue;
+    const days = Array.isArray(window.days) && window.days.length > 0 ? window.days : ALL_DAYS;
+    const sameDay = start < end;
+
+    if (sameDay) {
+      if (days.includes(local.day) && local.minute >= start && local.minute < end) return true;
+      continue;
+    }
+
+    if (start === end) {
+      if (days.includes(local.day)) return true;
+      continue;
+    }
+
+    if (local.minute >= start && days.includes(local.day)) return true;
+    const previousDay = (local.day + 6) % 7;
+    if (local.minute < end && days.includes(previousDay)) return true;
+  }
+
+  return false;
+}
+
+function nextAllowedHeartbeatAt(
+  config: HeartbeatConfig,
+  timezoneOffsetMinutes: number,
+  intervalMs: number,
+  fromMs: number
+): number {
+  const interval = Math.max(60_000, Math.round(intervalMs));
+  let candidate = fromMs + interval;
+  let guard = 0;
+
+  while (isHeartbeatExcludedAt(config, timezoneOffsetMinutes, new Date(candidate)) && guard < 20_000) {
+    candidate += interval;
+    guard++;
+  }
+
+  return candidate;
+}
+
+async function setupStatusline() {
+  await mkdir(CLAUDE_DIR, { recursive: true });
+  await writeFile(STATUSLINE_FILE, STATUSLINE_SCRIPT);
+
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = await Bun.file(CLAUDE_SETTINGS_FILE).json();
+  } catch {
+    // file doesn't exist or isn't valid JSON
+  }
+  settings.statusLine = {
+    type: "command",
+    command: "node .claude/statusline.cjs",
+  };
+  await writeFile(CLAUDE_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
+}
+
+async function teardownStatusline() {
+  try {
+    const settings = await Bun.file(CLAUDE_SETTINGS_FILE).json();
+    delete settings.statusLine;
+    await writeFile(CLAUDE_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    // file doesn't exist, nothing to clean up
+  }
+
+  try {
+    await unlink(STATUSLINE_FILE);
+  } catch {
+    // already gone
+  }
+}
+
+// --- Main ---
+
+export async function start(args: string[] = []) {
+  let hasPromptFlag = false;
+  let hasTriggerFlag = false;
+  let telegramFlag = false;
+  let discordFlag = false;
+  let slackFlag = false;
+let alexaFlag = false;
+let whatsappFlag = false;
+  let matrixFlag = false;
+  let debugFlag = false;
+  let webFlag = false;
+  let replaceExistingFlag = false;
+  let webPortFlag: number | null = null;
+  const payloadParts: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--prompt") {
+      hasPromptFlag = true;
+    } else if (arg === "--trigger") {
+      hasTriggerFlag = true;
+    } else if (arg === "--telegram") {
+      telegramFlag = true;
+    } else if (arg === "--discord") {
+      discordFlag = true;
+    } else if (arg === "--slack") {
+      slackFlag = true;
+} else if (arg === "--alexa") {
+      alexaFlag = true;
+} else if (arg === "--whatsapp") {
+      whatsappFlag = true;
+    } else if (arg === "--matrix") {
+      matrixFlag = true;
+    } else if (arg === "--debug") {
+      debugFlag = true;
+    } else if (arg === "--web") {
+      webFlag = true;
+    } else if (arg === "--replace-existing") {
+      replaceExistingFlag = true;
+    } else if (arg === "--web-port") {
+      const raw = args[i + 1];
+      if (!raw) {
+        console.error("`--web-port` requires a numeric value.");
+        process.exit(1);
+      }
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
+        console.error("`--web-port` must be a valid TCP port (1-65535).");
+        process.exit(1);
+      }
+      webPortFlag = parsed;
+      i++;
+    } else {
+      payloadParts.push(arg);
+    }
+  }
+  const payload = payloadParts.join(" ").trim();
+  if (hasPromptFlag && !payload) {
+console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--alexa] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+console.error("Usage: claudeclaw start --prompt <prompt> [--trigger] [--telegram] [--discord] [--slack] [--whatsapp] [--matrix] [--debug] [--web] [--web-port <port>] [--replace-existing]");
+    process.exit(1);
+  }
+  if (!hasPromptFlag && payload) {
+    console.error("Prompt text requires `--prompt`.");
+    process.exit(1);
+  }
+  if (telegramFlag && !hasTriggerFlag) {
+    console.error("`--telegram` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (discordFlag && !hasTriggerFlag) {
+    console.error("`--discord` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (slackFlag && !hasTriggerFlag) {
+    console.error("`--slack` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (alexaFlag && !hasTriggerFlag) {
+    console.error("`--alexa` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (whatsappFlag && !hasTriggerFlag) {
+    console.error("`--whatsapp` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (matrixFlag && !hasTriggerFlag) {
+    console.error("`--matrix` with `start` requires `--trigger`.");
+    process.exit(1);
+  }
+  if (hasPromptFlag && !hasTriggerFlag && (webFlag || webPortFlag !== null)) {
+    console.error("`--web` is daemon-only. Remove `--prompt`, or add `--trigger`.");
+    process.exit(1);
+  }
+
+  // One-shot mode: explicit prompt without trigger.
+  if (hasPromptFlag && !hasTriggerFlag) {
+    const existingPid = await checkExistingDaemon();
+    if (existingPid) {
+      console.error(`\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`);
+      console.error("Use `claudeclaw send <message> [--telegram] [--discord]` while daemon is running.");
+      process.exit(1);
+    }
+
+    await initConfig();
+    await loadSettings();
+    await ensureProjectClaudeMd();
+    const result = await runInteractive("prompt", payload);
+    console.log(result.stdout);
+    if (result.exitCode !== 0) process.exit(result.exitCode);
+    return;
+  }
+
+  const existingPid = await checkExistingDaemon();
+  if (existingPid) {
+    if (!replaceExistingFlag) {
+      console.error(`\x1b[31mAborted: daemon already running in this directory (PID ${existingPid})\x1b[0m`);
+      console.error(`Use --stop first, or kill PID ${existingPid} manually.`);
+      process.exit(1);
+    }
+
+    console.log(`Replacing existing daemon (PID ${existingPid})...`);
+    try {
+      process.kill(existingPid, "SIGTERM");
+    } catch {
+      // ignore if process is already dead
+    }
+
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(existingPid, 0);
+        await Bun.sleep(100);
+      } catch {
+        break;
+      }
+    }
+
+    await cleanupPidFile();
+  }
+
+  await initConfig();
+  const settings = await loadSettings();
+  await ensureProjectClaudeMd();
+  const jobs = await loadJobs();
+  const webEnabled = webFlag || webPortFlag !== null || settings.web.enabled;
+  const webPort = webPortFlag ?? settings.web.port;
+
+  await setupStatusline();
+  await writePidFile();
+  let web: WebServerHandle | null = null;
+  let discordStopGateway: (() => void) | null = null;
+  let slackStopApp: (() => void) | null = null;
+let alexaStopServer: (() => void) | null = null;
+  let alexaTunnelStop: (() => void) | null = null;
+let whatsappStopApp: (() => void) | null = null;
+  let matrixStopApp: (() => void) | null = null;
+
+  async function shutdown() {
+    if (discordStopGateway) discordStopGateway();
+    if (slackStopApp) slackStopApp();
+if (alexaStopServer) alexaStopServer();
+    if (alexaTunnelStop) alexaTunnelStop();
+if (whatsappStopApp) whatsappStopApp();
+    if (matrixStopApp) matrixStopApp();
+    if (web) web.stop();
+    await teardownStatusline();
+    await cleanupPidFile();
+    process.exit(0);
+  }
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+
+  console.log("ClaudeClaw daemon started");
+  sseEmit("daemon_start", "Daemon started", { pid: process.pid });
+  console.log(`  PID: ${process.pid}`);
+  console.log(`  Security: ${settings.security.level}`);
+  if (settings.security.allowedTools.length > 0)
+    console.log(`    + allowed: ${settings.security.allowedTools.join(", ")}`);
+  if (settings.security.disallowedTools.length > 0)
+    console.log(`    - blocked: ${settings.security.disallowedTools.join(", ")}`);
+  console.log(`  Heartbeat: ${settings.heartbeat.enabled ? `every ${settings.heartbeat.interval}m` : "disabled"}`);
+  console.log(`  Web UI: ${webEnabled ? `http://${settings.web.host}:${webPort}` : "disabled"}`);
+  if (debugFlag) console.log("  Debug: enabled");
+  console.log(`  Jobs loaded: ${jobs.length}`);
+  jobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]${j.parallel ? " (parallel)" : ""}`));
+
+  // --- Mutable state ---
+  let currentSettings: Settings = settings;
+  let currentJobs: Job[] = jobs;
+  let nextHeartbeatAt = 0;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  const daemonStartedAt = Date.now();
+
+  // --- Telegram ---
+  let telegramSend: ((chatId: number, text: string) => Promise<void>) | null = null;
+  let telegramToken = "";
+
+  async function initTelegram(token: string) {
+    if (token && token !== telegramToken) {
+      const { startPolling, sendMessage } = await import("./telegram");
+      startPolling(debugFlag);
+      telegramSend = (chatId, text) => sendMessage(token, chatId, text);
+      telegramToken = token;
+      console.log(`[${ts()}] Telegram: enabled`);
+    } else if (!token && telegramToken) {
+      telegramSend = null;
+      telegramToken = "";
+      console.log(`[${ts()}] Telegram: disabled`);
+    }
+  }
+
+  await initTelegram(currentSettings.telegram.token);
+  if (!telegramToken) console.log("  Telegram: not configured");
+
+  // --- Discord ---
+  let discordSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
+  let discordToken = "";
+
+  async function initDiscord(token: string) {
+    if (token && token !== discordToken) {
+      const { startGateway, sendMessageToUser, stopGateway } = await import("./discord");
+      if (discordToken) stopGateway();
+      startGateway(debugFlag);
+      discordStopGateway = stopGateway;
+      discordSendToUser = (userId, text) => sendMessageToUser(token, userId, text);
+      discordToken = token;
+      console.log(`[${ts()}] Discord: enabled`);
+    } else if (!token && discordToken) {
+      if (discordStopGateway) discordStopGateway();
+      discordStopGateway = null;
+      discordSendToUser = null;
+      discordToken = "";
+      console.log(`[${ts()}] Discord: disabled`);
+    }
+  }
+
+  await initDiscord(currentSettings.discord.token);
+  if (!discordToken) console.log("  Discord: not configured");
+
+  // --- Activity feed Discord forwarding ---
+  async function updateActivityFeedForwarding() {
+    const channelId = currentSettings.activityFeed?.discordChannel;
+    if (channelId && discordToken) {
+      const { sendMessage: discordSendMsg } = await import("./discord");
+      setDiscordForwarding(channelId, (chId, text) => discordSendMsg(discordToken, chId, text));
+    } else {
+      setDiscordForwarding(null, null);
+    }
+  }
+  await updateActivityFeedForwarding();
+
+  // --- Slack ---
+  let slackSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
+  let slackToken = "";
+
+  async function initSlack(token: string, appToken: string) {
+    if (token && appToken && token !== slackToken) {
+      const { startApp, sendMessageToUser: slackSendMsgToUser, stopApp } = await import("./slack");
+      if (slackToken) stopApp();
+      startApp(debugFlag);
+      slackStopApp = stopApp;
+      slackSendToUser = (userId, text) => slackSendMsgToUser(userId, text);
+      slackToken = token;
+      console.log(`[${ts()}] Slack: enabled`);
+    } else if ((!token || !appToken) && slackToken) {
+      if (slackStopApp) slackStopApp();
+      slackStopApp = null;
+      slackSendToUser = null;
+      slackToken = "";
+      console.log(`[${ts()}] Slack: disabled`);
+    }
+  }
+
+  await initSlack(currentSettings.slack.token, currentSettings.slack.appToken);
+  if (!slackToken) console.log("  Slack: not configured");
+
+// --- Alexa ---
+  let alexaEnabled = false;
+  let alexaPort = 0;
+
+  async function initAlexa(enabled: boolean) {
+    if (enabled && !alexaEnabled) {
+      const { startAlexaServer, stopAlexaServer } = await import("./alexa");
+      const { startTunnel, printManualTunnelInstructions } = await import("../alexa-tunnel");
+      startAlexaServer(debugFlag);
+      alexaStopServer = stopAlexaServer;
+      alexaEnabled = true;
+      alexaPort = currentSettings.alexa.port;
+      console.log(`[${ts()}] Alexa: enabled (port ${alexaPort})`);
+
+      // Start tunnel if configured
+      const tunnelType = currentSettings.alexa.tunnelType;
+      if (tunnelType !== "none") {
+        try {
+          const tunnel = await startTunnel(alexaPort, tunnelType);
+          if (tunnel) {
+            console.log(`[${ts()}] Alexa tunnel: ${tunnel.url}`);
+            console.log(`[${ts()}] Set this URL as your Alexa skill endpoint in the Developer Console`);
+            alexaTunnelStop = tunnel.stop;
+          } else {
+            printManualTunnelInstructions(alexaPort);
+          }
+        } catch (err) {
+          console.error(`[${ts()}] Alexa tunnel failed: ${err instanceof Error ? err.message : err}`);
+          printManualTunnelInstructions(alexaPort);
+        }
+      }
+    } else if (!enabled && alexaEnabled) {
+      if (alexaStopServer) alexaStopServer();
+      if (alexaTunnelStop) { alexaTunnelStop(); alexaTunnelStop = null; }
+      alexaStopServer = null;
+      alexaEnabled = false;
+      console.log(`[${ts()}] Alexa: disabled`);
+    }
+  }
+
+  const alexaStartEnabled = alexaFlag || currentSettings.alexa.enabled;
+  await initAlexa(alexaStartEnabled);
+  if (!alexaEnabled) console.log("  Alexa: not configured");
+// --- WhatsApp ---
+  let whatsappSendToUser: ((phoneNumber: string, text: string) => Promise<void>) | null = null;
+  let whatsappConfigured = false;
+
+  async function initWhatsApp(allowedNumbers: string[]) {
+    const hasNumbers = allowedNumbers.length > 0;
+    if (hasNumbers && !whatsappConfigured) {
+      const { startApp, sendMessageToUser: waSendToUser, stopApp } = await import("./whatsapp");
+      startApp(debugFlag);
+      whatsappStopApp = stopApp;
+      whatsappSendToUser = (num, text) => waSendToUser(num, text);
+      whatsappConfigured = true;
+      console.log(`[${ts()}] WhatsApp: enabled`);
+    } else if (!hasNumbers && whatsappConfigured) {
+      if (whatsappStopApp) whatsappStopApp();
+      whatsappStopApp = null;
+      whatsappSendToUser = null;
+      whatsappConfigured = false;
+      console.log(`[${ts()}] WhatsApp: disabled`);
+    }
+  }
+
+  await initWhatsApp(currentSettings.whatsapp.allowedNumbers);
+  if (!whatsappConfigured) console.log("  WhatsApp: not configured (set whatsapp.allowedNumbers to enable forwarding)");
+
+  // --- Matrix ---
+  let matrixSendToUser: ((userId: string, text: string) => Promise<void>) | null = null;
+  let matrixToken = "";
+
+  async function initMatrix(accessToken: string, homeserverUrl: string, userId: string) {
+    if (accessToken && homeserverUrl && userId && accessToken !== matrixToken) {
+      const { startApp, sendMessageToUser: mxSendToUser, stopApp } = await import("./matrix");
+      if (matrixToken) stopApp();
+      startApp(debugFlag);
+      matrixStopApp = stopApp;
+      matrixSendToUser = (uid, text) => mxSendToUser(uid, text);
+      matrixToken = accessToken;
+      console.log(`[${ts()}] Matrix: enabled`);
+    } else if ((!accessToken || !homeserverUrl || !userId) && matrixToken) {
+      if (matrixStopApp) matrixStopApp();
+      matrixStopApp = null;
+      matrixSendToUser = null;
+      matrixToken = "";
+      console.log(`[${ts()}] Matrix: disabled`);
+    }
+  }
+
+  await initMatrix(currentSettings.matrix.accessToken, currentSettings.matrix.homeserverUrl, currentSettings.matrix.userId);
+  if (!matrixToken) console.log("  Matrix: not configured");
+
+  function isAddrInUse(err: unknown): boolean {
+    if (!err || typeof err !== "object") return false;
+    const code = "code" in err ? String((err as { code?: unknown }).code) : "";
+    const message = "message" in err ? String((err as { message?: unknown }).message) : "";
+    return code === "EADDRINUSE" || message.includes("EADDRINUSE");
+  }
+
+  function startWebWithFallback(host: string, preferredPort: number): WebServerHandle {
+    const maxAttempts = 10;
+    let lastError: unknown;
+    for (let i = 0; i < maxAttempts; i++) {
+      const candidatePort = preferredPort + i;
+      try {
+        return startWebUi({
+          host,
+          port: candidatePort,
+          getSnapshot: () => ({
+            pid: process.pid,
+            startedAt: daemonStartedAt,
+            heartbeatNextAt: nextHeartbeatAt,
+            settings: currentSettings,
+            jobs: currentJobs,
+          }),
+          onHeartbeatEnabledChanged: (enabled) => {
+            if (currentSettings.heartbeat.enabled === enabled) return;
+            currentSettings.heartbeat.enabled = enabled;
+            scheduleHeartbeat();
+            updateState();
+            console.log(`[${ts()}] Heartbeat ${enabled ? "enabled" : "disabled"} from Web UI`);
+          },
+          onHeartbeatSettingsChanged: (patch) => {
+            let changed = false;
+            if (typeof patch.enabled === "boolean" && currentSettings.heartbeat.enabled !== patch.enabled) {
+              currentSettings.heartbeat.enabled = patch.enabled;
+              changed = true;
+            }
+            if (typeof patch.interval === "number" && Number.isFinite(patch.interval)) {
+              const interval = Math.max(1, Math.min(1440, Math.round(patch.interval)));
+              if (currentSettings.heartbeat.interval !== interval) {
+                currentSettings.heartbeat.interval = interval;
+                changed = true;
+              }
+            }
+          if (typeof patch.prompt === "string" && currentSettings.heartbeat.prompt !== patch.prompt) {
+            currentSettings.heartbeat.prompt = patch.prompt;
+            changed = true;
+          }
+          if (Array.isArray(patch.excludeWindows)) {
+            const prev = JSON.stringify(currentSettings.heartbeat.excludeWindows);
+            const next = JSON.stringify(patch.excludeWindows);
+            if (prev !== next) {
+              currentSettings.heartbeat.excludeWindows = patch.excludeWindows;
+              changed = true;
+            }
+          }
+          if (!changed) return;
+          scheduleHeartbeat();
+          updateState();
+            console.log(`[${ts()}] Heartbeat settings updated from Web UI`);
+          },
+          onJobsChanged: async () => {
+            currentJobs = await loadJobs();
+            scheduleHeartbeat();
+            updateState();
+            console.log(`[${ts()}] Jobs reloaded from Web UI`);
+          },
+        });
+      } catch (err) {
+        lastError = err;
+        if (!isAddrInUse(err) || i === maxAttempts - 1) throw err;
+      }
+    }
+
+    throw lastError;
+  }
+
+  if (webEnabled) {
+    currentSettings.web.enabled = true;
+    web = startWebWithFallback(currentSettings.web.host, webPort);
+    currentSettings.web.port = web.port;
+    console.log(`[${new Date().toLocaleTimeString()}] Web UI listening on http://${web.host}:${web.port}`);
+  }
+
+  // --- Helpers ---
+  function ts() { return new Date().toLocaleTimeString(); }
+
+  function startPreflightInBackground(projectPath: string): void {
+    try {
+      const proc = Bun.spawn([process.execPath, "run", PREFLIGHT_SCRIPT, projectPath], {
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      proc.unref();
+      console.log(`[${ts()}] Plugin preflight started in background`);
+    } catch (err) {
+      console.error(`[${ts()}] Failed to start plugin preflight:`, err);
+    }
+  }
+
+  function checkUpdatesInBackground(updateConfig: UpdateConfig): void {
+    // Non-blocking update check on daemon start
+    Promise.resolve().then(async () => {
+      try {
+        const result = await checkForUpdates(updateConfig);
+
+        if (!result.updateAvailable) {
+          console.log(`[${ts()}] Update check: up to date (${result.latestSHA.slice(0, 8)})`);
+          return;
+        }
+
+        const changelog = formatChangelog(result.commits);
+        const notice = `ClaudeClaw update available: ${result.currentSHA?.slice(0, 8) ?? "?"} → ${result.latestSHA.slice(0, 8)}\n${changelog}\n\nRun: claudeclaw update`;
+        console.log(`[${ts()}] ${notice}`);
+
+        if (!updateConfig.autoUpdate) {
+          // Just notify — don't auto-apply
+          if (updateConfig.notifyOnUpdate) {
+            const channels = buildNotifyChannels();
+            await notifyChannels(channels, notice);
+          }
+          return;
+        }
+
+        // Auto-update: notify "updating..." then apply
+        if (updateConfig.notifyOnUpdate) {
+          const channels = buildNotifyChannels();
+          const msg = `Updating ClaudeClaw ${result.currentSHA?.slice(0, 8) ?? "?"} → ${result.latestSHA.slice(0, 8)}... back in a moment.`;
+          await notifyChannels(channels, msg);
+        }
+
+        console.log(`[${ts()}] Auto-updating ClaudeClaw...`);
+        const applyResult = await applyUpdate(updateConfig, (msg) => console.log(`[${ts()}] [update] ${msg}`));
+
+        if (!applyResult.success) {
+          const errMsg = `ClaudeClaw auto-update failed: ${applyResult.error}`;
+          console.error(`[${ts()}] ${errMsg}`);
+          if (updateConfig.notifyOnUpdate) {
+            const channels = buildNotifyChannels();
+            await notifyChannels(channels, errMsg);
+          }
+          return;
+        }
+
+        const successMsg = `ClaudeClaw updated: ${applyResult.previousSHA?.slice(0, 8) ?? "?"} → ${applyResult.newSHA.slice(0, 8)}. Restarting daemon...`;
+        console.log(`[${ts()}] ${successMsg}`);
+
+        if (updateConfig.notifyOnUpdate) {
+          const channels = buildNotifyChannels();
+          await notifyChannels(channels, successMsg);
+        }
+
+        // Small delay so notifications can be sent before we restart
+        await Bun.sleep(1500);
+        const installPath = getPluginInstallPath();
+        await restartDaemon(installPath, (msg) => console.log(`[${ts()}] [update] ${msg}`));
+      } catch (err) {
+        console.error(`[${ts()}] Update check error: ${err instanceof Error ? err.message : err}`);
+      }
+    });
+  }
+
+  function buildNotifyChannels() {
+    return {
+      telegram: currentSettings.telegram.token && telegramSend && currentSettings.telegram.allowedUserIds.length > 0
+        ? { send: (id: number, text: string) => telegramSend!(id, text), userIds: currentSettings.telegram.allowedUserIds }
+        : undefined,
+      discord: currentSettings.discord.token && discordSendToUser && currentSettings.discord.allowedUserIds.length > 0
+        ? { send: (id: string, text: string) => discordSendToUser!(id, text), userIds: currentSettings.discord.allowedUserIds }
+        : undefined,
+      slack: currentSettings.slack.token && slackSendToUser && currentSettings.slack.allowedUserIds.length > 0
+        ? { send: (id: string, text: string) => slackSendToUser!(id, text), userIds: currentSettings.slack.allowedUserIds }
+        : undefined,
+    };
+  }
+
+  function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!telegramSend || currentSettings.telegram.allowedUserIds.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const userId of currentSettings.telegram.allowedUserIds) {
+      telegramSend(userId, text).catch((err) =>
+        console.error(`[Telegram] Failed to forward to ${userId}: ${err}`)
+      );
+    }
+  }
+
+  function forwardToDiscord(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!discordSendToUser || currentSettings.discord.allowedUserIds.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const userId of currentSettings.discord.allowedUserIds) {
+      discordSendToUser(userId, text).catch((err) =>
+        console.error(`[Discord] Failed to forward to ${userId}: ${err}`)
+      );
+    }
+  }
+
+  function forwardToSlack(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!slackSendToUser || currentSettings.slack.allowedUserIds.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const userId of currentSettings.slack.allowedUserIds) {
+      slackSendToUser(userId, text).catch((err) =>
+        console.error(`[Slack] Failed to forward to ${userId}: ${err}`)
+      );
+    }
+  }
+
+  function forwardToWhatsApp(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!whatsappSendToUser || currentSettings.whatsapp.allowedNumbers.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const number of currentSettings.whatsapp.allowedNumbers) {
+      whatsappSendToUser(number, text).catch((err) =>
+        console.error(`[WhatsApp] Failed to forward to ${number}: ${err}`)
+      );
+    }
+  }
+
+  function forwardToMatrix(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    if (!matrixSendToUser || currentSettings.matrix.allowedUserIds.length === 0) return;
+    const text = result.exitCode === 0
+      ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
+      : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+    for (const userId of currentSettings.matrix.allowedUserIds) {
+      matrixSendToUser(userId, text).catch((err) =>
+        console.error(`[Matrix] Failed to forward to ${userId}: ${err}`)
+      );
+    }
+  }
+
+  // --- Heartbeat scheduling ---
+  function scheduleHeartbeat() {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
+    heartbeatTimer = null;
+
+    if (!currentSettings.heartbeat.enabled) {
+      nextHeartbeatAt = 0;
+      return;
+    }
+
+    const ms = currentSettings.heartbeat.interval * 60_000;
+    nextHeartbeatAt = nextAllowedHeartbeatAt(
+      currentSettings.heartbeat,
+      currentSettings.timezoneOffsetMinutes,
+      ms,
+      Date.now()
+    );
+
+    function tick() {
+      if (isHeartbeatExcludedNow(currentSettings.heartbeat, currentSettings.timezoneOffsetMinutes)) {
+        console.log(`[${ts()}] Heartbeat skipped (excluded window)`);
+        nextHeartbeatAt = nextAllowedHeartbeatAt(
+          currentSettings.heartbeat,
+          currentSettings.timezoneOffsetMinutes,
+          ms,
+          Date.now()
+        );
+        return;
+      }
+      sseEmit("heartbeat_start", "Heartbeat running");
+      forwardToDiscordFeed("\u{1F493} Heartbeat started");
+      Promise.all([
+        resolvePrompt(currentSettings.heartbeat.prompt),
+        loadHeartbeatPromptTemplate(),
+      ])
+        .then(([prompt, template]) => {
+          const userPromptSection = prompt.trim()
+            ? `User custom heartbeat prompt:\n${prompt.trim()}`
+            : "";
+          const mergedPrompt = [template.trim(), userPromptSection]
+            .filter((part) => part.length > 0)
+            .join("\n\n");
+          if (!mergedPrompt) return null;
+          return run("heartbeat", mergedPrompt);
+        })
+        .then((r) => {
+          if (!r) return;
+          const isOk = r.stdout.trim().startsWith("HEARTBEAT_OK");
+          sseEmit("heartbeat_result", isOk ? "Heartbeat OK" : "Heartbeat has output", {
+            exitCode: r.exitCode,
+            preview: r.stdout.slice(0, 200),
+          });
+          if (!isOk) forwardToDiscordFeed(`\u{1F493} Heartbeat: ${r.stdout.slice(0, 120)}`);
+          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !isOk;
+          if (shouldForward) {
+            forwardToTelegram("", r);
+            forwardToDiscord("", r);
+            forwardToSlack("", r);
+            forwardToWhatsApp("", r);
+            forwardToMatrix("", r);
+          }
+        });
+      nextHeartbeatAt = nextAllowedHeartbeatAt(
+        currentSettings.heartbeat,
+        currentSettings.timezoneOffsetMinutes,
+        ms,
+        Date.now()
+      );
+    }
+
+    heartbeatTimer = setTimeout(function runAndReschedule() {
+      tick();
+      heartbeatTimer = setTimeout(runAndReschedule, ms);
+    }, ms);
+  }
+
+  // Startup init:
+  // - trigger mode: run exactly one trigger prompt (no separate bootstrap)
+  // - normal mode: bootstrap to initialize session context
+  if (hasTriggerFlag) {
+    const triggerPrompt = hasPromptFlag ? payload : "Wake up, my friend!";
+    const triggerResult = await run("trigger", triggerPrompt);
+    console.log(triggerResult.stdout);
+    if (telegramFlag) forwardToTelegram("", triggerResult);
+    if (discordFlag) forwardToDiscord("", triggerResult);
+    if (slackFlag) forwardToSlack("", triggerResult);
+    if (whatsappFlag) forwardToWhatsApp("", triggerResult);
+    if (matrixFlag) forwardToMatrix("", triggerResult);
+    if (triggerResult.exitCode !== 0) {
+      console.error(`[${ts()}] Startup trigger failed (exit ${triggerResult.exitCode}). Daemon will continue running.`);
+    }
+  } else {
+    // Bootstrap the session first so system prompt is initial context
+    // and session.json is created immediately.
+    await bootstrap();
+  }
+
+  // Install plugins without blocking daemon startup.
+  startPreflightInBackground(process.cwd());
+
+  // Check for updates in background (non-blocking).
+  checkUpdatesInBackground(currentSettings.update);
+
+  if (currentSettings.heartbeat.enabled) scheduleHeartbeat();
+
+  // --- Hot-reload loop (every 30s) ---
+  setInterval(async () => {
+    try {
+      const newSettings = await reloadSettings();
+      const newJobs = await loadJobs();
+
+      // Detect heartbeat config changes
+      const hbChanged =
+        newSettings.heartbeat.enabled !== currentSettings.heartbeat.enabled ||
+        newSettings.heartbeat.interval !== currentSettings.heartbeat.interval ||
+        newSettings.heartbeat.prompt !== currentSettings.heartbeat.prompt ||
+        newSettings.timezoneOffsetMinutes !== currentSettings.timezoneOffsetMinutes ||
+        newSettings.timezone !== currentSettings.timezone ||
+        JSON.stringify(newSettings.heartbeat.excludeWindows) !== JSON.stringify(currentSettings.heartbeat.excludeWindows);
+
+      // Detect security config changes
+      const secChanged =
+        newSettings.security.level !== currentSettings.security.level ||
+        newSettings.security.allowedTools.join(",") !== currentSettings.security.allowedTools.join(",") ||
+        newSettings.security.disallowedTools.join(",") !== currentSettings.security.disallowedTools.join(",");
+
+      if (secChanged) {
+        console.log(`[${ts()}] Security level changed → ${newSettings.security.level}`);
+      }
+
+      if (hbChanged) {
+        console.log(`[${ts()}] Config change detected — heartbeat: ${newSettings.heartbeat.enabled ? `every ${newSettings.heartbeat.interval}m` : "disabled"}`);
+        currentSettings = newSettings;
+        scheduleHeartbeat();
+      } else {
+        currentSettings = newSettings;
+      }
+      if (web) {
+        currentSettings.web.enabled = true;
+        currentSettings.web.port = web.port;
+      }
+
+      // Detect job changes
+      const jobNames = newJobs.map((j) => `${j.name}:${j.schedule}:${j.prompt}`).sort().join("|");
+      const oldJobNames = currentJobs.map((j) => `${j.name}:${j.schedule}:${j.prompt}`).sort().join("|");
+      if (jobNames !== oldJobNames) {
+        console.log(`[${ts()}] Jobs reloaded: ${newJobs.length} job(s)`);
+        newJobs.forEach((j) => console.log(`    - ${j.name} [${j.schedule}]${j.parallel ? " (parallel)" : ""}`));
+      }
+      currentJobs = newJobs;
+
+      // Telegram changes
+      await initTelegram(newSettings.telegram.token);
+
+      // Discord changes
+      await initDiscord(newSettings.discord.token);
+
+      // Activity feed forwarding
+      await updateActivityFeedForwarding();
+
+      // Slack changes
+      await initSlack(newSettings.slack.token, newSettings.slack.appToken);
+
+// Alexa changes
+      await initAlexa(newSettings.alexa.enabled);
+// WhatsApp changes
+      await initWhatsApp(newSettings.whatsapp.allowedNumbers);
+
+      // Matrix changes
+      await initMatrix(newSettings.matrix.accessToken, newSettings.matrix.homeserverUrl, newSettings.matrix.userId);
+    } catch (err) {
+      console.error(`[${ts()}] Hot-reload error:`, err);
+    }
+  }, 30_000);
+
+  // --- Cron tick (every 60s) ---
+  function updateState() {
+    const now = new Date();
+    const state: StateData = {
+      heartbeat: currentSettings.heartbeat.enabled
+        ? { nextAt: nextHeartbeatAt }
+        : undefined,
+      jobs: currentJobs.map((job) => ({
+        name: job.name,
+        nextAt: nextCronMatch(job.schedule, now, currentSettings.timezoneOffsetMinutes).getTime(),
+      })),
+      security: currentSettings.security.level,
+      telegram: !!currentSettings.telegram.token,
+      discord: !!currentSettings.discord.token,
+      slack: !!currentSettings.slack.token,
+alexa: alexaEnabled,
+whatsapp: whatsappConfigured,
+      matrix: !!matrixToken,
+      startedAt: daemonStartedAt,
+      web: {
+        enabled: !!web,
+        host: currentSettings.web.host,
+        port: currentSettings.web.port,
+      },
+    };
+    writeState(state);
+  }
+
+  updateState();
+
+  setInterval(() => {
+    const now = new Date();
+    for (const job of currentJobs) {
+      if (cronMatches(job.schedule, now, currentSettings.timezoneOffsetMinutes)) {
+        sseEmit("job_start", `Job started: ${job.name}${job.parallel ? " (parallel)" : ""}`, { job: job.name, parallel: job.parallel });
+        forwardToDiscordFeed(`\u{1F4CB} Job started: ${job.name}${job.parallel ? " (parallel)" : ""}`);
+        resolvePrompt(job.prompt)
+          .then((prompt) => job.parallel ? runParallel(job.name, prompt) : run(job.name, prompt))
+          .then((r) => {
+            sseEmit("job_result", `Job finished: ${job.name}`, {
+              job: job.name,
+              exitCode: r.exitCode,
+              preview: r.stdout.slice(0, 200),
+            });
+            forwardToDiscordFeed(`\u{2705} Job done: ${job.name} (exit ${r.exitCode})`);
+            if (job.notify === false) return;
+            if (job.notify === "error" && r.exitCode === 0) return;
+            forwardToTelegram(job.name, r);
+            forwardToDiscord(job.name, r);
+            forwardToSlack(job.name, r);
+            forwardToWhatsApp(job.name, r);
+            forwardToMatrix(job.name, r);
+          })
+          .finally(async () => {
+            if (job.recurring) return;
+            try {
+              await clearJobSchedule(job.name);
+              console.log(`[${ts()}] Cleared schedule for one-time job: ${job.name}`);
+            } catch (err) {
+              console.error(`[${ts()}] Failed to clear schedule for ${job.name}:`, err);
+            }
+          });
+      }
+    }
+    updateState();
+  }, 60_000);
+}
